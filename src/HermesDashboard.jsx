@@ -1,6 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart } from "lucide-react";
 
+// v10.4：雙環境儲存 — artifact 有 window.storage 就用佢；
+// 獨立網頁（Vite/GitHub Pages/Wix 自己 host）自動 fallback 去 localStorage，
+// 咁同一份 file 喺 artifact 內外都行到，儲存兩邊都通。
+if (typeof window !== "undefined" && !window.storage) {
+  window.storage = {
+    async get(k) { const v = localStorage.getItem("ws:" + k); if (v === null) throw new Error("key not found"); return { key: k, value: v }; },
+    async set(k, v) { localStorage.setItem("ws:" + k, v); return { key: k, value: v }; },
+    async delete(k) { localStorage.removeItem("ws:" + k); return { key: k, deleted: true }; },
+    async list(prefix = "") { return { keys: Object.keys(localStorage).filter(x => x.startsWith("ws:" + prefix)).map(x => x.slice(3)) }; },
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Hermes AI · Daily Work Tracker v10 — APPLE STYLE + DASHBOARD + 多 AI PROVIDER
 // v10 新增：⚙️ AI 設定可揀 Claude / Gemini 2.5 Flash-Lite / OpenAI（gpt-4o-mini），
@@ -150,6 +162,8 @@ export default function HermesDashboard() {
   const [aiInput, setAiInput] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSugs, setAiSugs] = useState([]);
+  const [storageOk, setStorageOk] = useState(null); // v10.1：storage 自我檢測（null=檢緊 true=通 false=斷）
+  const [pingStatus, setPingStatus] = useState(null); // v10.2：AI 連線測試 null | "testing" | {ok, msg}
   const aiEndRef = useRef(null);
 
   useEffect(() => { if (aiOpen) aiEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [aiMsgs, aiLoading, aiOpen]);
@@ -186,10 +200,35 @@ export default function HermesDashboard() {
       if (!s) s = freshState(c);
       if (s.date !== todayStr()) s = rollover(s, c);
       setCfg(c); setState(s); persist(s);
+      // v10.1：實測 storage 寫入＋讀返，肉眼確認持久化通唔通
+      try {
+        const probe = "p" + Date.now();
+        await window.storage.set("hermes-probe", probe);
+        const back = await window.storage.get("hermes-probe");
+        setStorageOk(!!(back && back.value === probe));
+      } catch { setStorageOk(false); }
     })();
   }, []);
 
-  async function persist(s) { try { await window.storage.set("hermes-state-v6", JSON.stringify(s)); } catch (e) { console.error(e); } }
+  // v10.1 fix：debounce 寫入 — 之前每粒 keystroke 寫一次 storage，撞 rate limit 後全部 silently fail
+  const persistTimer = useRef(null);
+  const pendingState = useRef(null);
+  async function flushPersist() {
+    if (persistTimer.current) { clearTimeout(persistTimer.current); persistTimer.current = null; }
+    if (!pendingState.current) return;
+    const snap = pendingState.current; pendingState.current = null;
+    try { await window.storage.set("hermes-state-v6", JSON.stringify(snap)); } catch (e) { console.error("storage set fail", e); }
+  }
+  function persist(s) {
+    pendingState.current = s;
+    if (persistTimer.current) clearTimeout(persistTimer.current);
+    persistTimer.current = setTimeout(flushPersist, 600);
+  }
+  useEffect(() => {
+    const onHide = () => { if (document.visibilityState === "hidden") flushPersist(); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, []);
   function mutate(fn) { setState(prev => { const n = fn(prev); persist(n); return n; }); }
   const setTask = (id, patch) => mutate(s => ({ ...s, tasks: s.tasks.map(k => (k.id === id ? { ...k, ...patch } : k)) }));
 
@@ -275,17 +314,26 @@ export default function HermesDashboard() {
       headers["anthropic-dangerous-direct-browser-access"] = "true";
     }
     let res;
+    // v10.3：keyless 用最保守形態 — system 摺入第一個 user message，同官方最簡例子一模一樣
+    const foldedMsgs = (!key && system)
+      ? messages.map((m, i) => (i === 0 && m.role === "user" ? { ...m, content: `【系統指示】${system}\n\n【用戶輸入】${m.content}` } : m))
+      : messages;
     try {
       res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers,
-        body: JSON.stringify({
-          model: PROVIDERS.claude.model, max_tokens: maxTokens,
-          thinking: { type: "adaptive" }, output_config: { effort: "low" },
-          system, messages,
-        }),
+        body: JSON.stringify(
+          key
+            ? { // 有 key（本地／自己 host）：照舊行 Opus + adaptive thinking
+                model: PROVIDERS.claude.model, max_tokens: maxTokens,
+                thinking: { type: "adaptive" }, output_config: { effort: "low" },
+                system, messages,
+              }
+            : { model: "claude-sonnet-4-6", max_tokens: 1000, messages: foldedMsgs }
+        ),
       });
     } catch (e) {
-      throw new Error(key ? "網絡錯誤：" + String(e).slice(0, 60) : "本地環境要 key，或者轉用 Gemini／OpenAI — 去儀表板「⚙️ AI 設定」");
+      // v10.2：唔再食咗原始錯誤 — 顯示出嚟先診斷到係 CORS／沙盒定網絡問題
+      throw new Error((key ? "網絡錯誤" : "keyless 通道連唔上") + "：" + String(e).slice(0, 90) + (key ? "" : "｜快救：轉 Gemini（aistudio.google.com/apikey 免費 key）"));
     }
     const data = await res.json();
     if (data.error) {
@@ -295,6 +343,35 @@ export default function HermesDashboard() {
     return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
   }
   const pickJSON = (raw, fallback = "[]") => { const m = raw.match(/\[[\s\S]*\]/); return JSON.parse(m ? m[0] : fallback); };
+  // v10.3：深度診斷 — keyless Claude 逐個變量試，搵出 bridge 唔食邊樣
+  async function pingAI() {
+    setPingStatus("testing");
+    const key = cleanKey(state.apiKey);
+    if (provider !== "claude" || key) {
+      try {
+        const out = await callAI({ maxTokens: 20, system: "淨係回覆一個字：通", messages: [{ role: "user", content: "ping" }] });
+        setPingStatus({ ok: true, msg: `通（回覆：${(out || "").trim().slice(0, 30)}）` });
+      } catch (e) { setPingStatus({ ok: false, msg: String(e.message || e).slice(0, 180) }); }
+      return;
+    }
+    const lines = [];
+    const tryVariant = async (label, body) => {
+      try {
+        const r = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const d = await r.json();
+        if (d.error) { lines.push(`✗ ${label}：API — ${(d.error.message || "error").slice(0, 60)}`); return false; }
+        const t = (d.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
+        lines.push(`✓ ${label}：通（${t.slice(0, 15)}）`); return true;
+      } catch (e) { lines.push(`✗ ${label}：${String(e).slice(0, 60)}`); return false; }
+    };
+    const okA = await tryVariant("A 最簡", { model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: "淨係回覆一個字：通" }] });
+    const okB = await tryVariant("B 加 system", { model: "claude-sonnet-4-6", max_tokens: 1000, system: "淨係回覆一個字：通", messages: [{ role: "user", content: "ping" }] });
+    let verdict = "";
+    if (okA && !okB) verdict = "\n→ 元兇係 system 參數；app 已改用摺入式，✨✂️🌱 應該用得";
+    else if (okA && okB) verdict = "\n→ 通道正常，✨✂️🌱 應該用得";
+    else verdict = "\n→ keyless 通道喺呢部機斷咗 — 建議 ⚙️ 轉 Gemini（aistudio.google.com/apikey 免費）";
+    setPingStatus({ ok: okA, msg: lines.join("\n") + verdict });
+  }
   const lineDescStr = () => cfg.lines.map(l => `${l.id}=${l.emoji}${l.label}（${l.tier === "focus" ? "主攻" : "次要"}）`).join("、") + "、personal=🧍個人";
 
   // 🌱 延伸 ×2 — 直接問 Claude（v9：唔再靠 /api/extend 後端）
@@ -752,7 +829,7 @@ export default function HermesDashboard() {
             ))}
           </div>
           <p className="text-xs mt-2" style={{ color: C.sub, lineHeight: 1.5 }}>
-            {provider === "claude" && <>模型 <b>claude-opus-4-8</b>。喺 claude.ai artifact 入面：留空 key 直接用。本地：入 Anthropic key（console.anthropic.com/settings/keys）。</>}
+            {provider === "claude" && <>喺 claude.ai artifact 入面：留空 key 直接用（行 <b>claude-sonnet-4-6</b>）。本地入 Anthropic key 就行 <b>claude-opus-4-8</b>（console.anthropic.com/settings/keys）。</>}
             {provider === "gemini" && <>自動用最新 <b>flash-lite</b> 模型（舊版落架會自動換新）。免費 key：aistudio.google.com/apikey。</>}
             {provider === "openai" && <>模型 <b>gpt-4o-mini</b>。Key：platform.openai.com/api-keys。</>}
             {" "}Key 淨係存喺你部機 localStorage，唔會上傳去第三方。
@@ -774,6 +851,15 @@ export default function HermesDashboard() {
           )}
           {hasKey && <p className="text-xs mt-1.5 font-semibold" style={{ color: C.green }}>✓ 已設定 — ✨ 助手、✂️ 拆細、🌱 延伸而家行 {PROVIDERS[provider].label}（{provider === "gemini" ? (state.geminiModel || "flash-lite 自動偵測") : PROVIDERS[provider].model}）</p>}
           {!hasKey && provider === "claude" && <p className="text-xs mt-1.5" style={{ color: C.sub }}>未入 key — claude.ai artifact 入面照用得；本地會提示你入 key 或轉 provider。</p>}
+          {/* v10.2：一鍵連線測試 */}
+          <div className="flex items-start gap-2 mt-2 flex-wrap">
+            <Chip bg={C.blueSoft} fg={C.blue} onClick={pingAI}>{pingStatus === "testing" ? "測緊…" : "🔌 測試 AI 連線"}</Chip>
+            {pingStatus && pingStatus !== "testing" && (
+              <span className="text-xs" style={{ color: pingStatus.ok ? C.green : C.red, lineHeight: 1.6, flex: 1, minWidth: 180, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                {pingStatus.msg}
+              </span>
+            )}
+          </div>
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
@@ -818,7 +904,11 @@ export default function HermesDashboard() {
         <div className="mx-auto px-4 pt-3 pb-2" style={{ maxWidth: 480 }}>
           <div className="flex items-end justify-between">
             <div>
-              <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>HERMES AI · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}</p>
+              <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
+                HERMES AI <span style={{ color: C.pink }}>v10.4</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
+                {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
+              </p>
               <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : "今日"}</h1>
             </div>
             <span className="text-xs font-semibold rounded-full px-2.5 py-1" style={{ background: C.blueSoft, color: C.blue }}>衝刺 #{cfg.sprint.num} · {fmtMD(cfg.sprint.start)}–{fmtMD(cfg.sprint.end)}</span>
