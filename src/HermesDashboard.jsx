@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v13：任務可以設 ⏰ 提醒（日期時間＋一次／每1小時／每3小時／每8小時／每日）；
+//      儀表板新增「🔔 提醒清單」— 齊晒所有提醒 + 每個 PIC 委派任務嘅死線；
+//      到鐘會轉紅＋（app 開住時）彈瀏覽器通知；重複提醒自動排下一輪。
 // v12：🌱 延伸建議可以俾 1–5 ★ 評分 — 評分會記低（最近 100 次），
 //      以後 AI 出建議會參考你嘅口味（高分嗰類多啲、低分嗰類避開）；
 //      WIG 追蹤板可編輯（✏️ 改名、撳 P 轉優先級、撳期切換、🗑️ 刪除）；
@@ -86,11 +89,15 @@ const SHADOW = "0 1px 3px rgba(0,0,0,0.06)";
 const BLUR = { background: "rgba(242,242,247,0.82)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" };
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const mk = (line, title, focus = false, extra = {}) => ({ id: uid(), line, title, focus, status: "open", reason: null, red: 0, assignee: null, deadline: null, received: false, due: null, score: null, ext: false, followUp: false, sm: false, ...extra });
+const mk = (line, title, focus = false, extra = {}) => ({ id: uid(), line, title, focus, status: "open", reason: null, red: 0, assignee: null, deadline: null, received: false, due: null, score: null, ext: false, followUp: false, sm: false, remindAt: null, remindEvery: null, remindFired: false, ...extra });
 const todayStr = () => new Date().toLocaleDateString("en-CA");
 const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toLocaleDateString("en-CA"); };
 const snapToWindow = (iso, win) => { if (!win) return iso; const d = new Date(iso + "T00:00:00"); while (!win.includes(d.getDay())) d.setDate(d.getDate() + 1); return d.toLocaleDateString("en-CA"); };
 const fmtMD = iso => (iso ? `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}` : "");
+// v13：提醒工具
+const fmtDT = iso => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+const toLocalInput = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+const REPEAT_LABELS = { 1: "每1小時", 3: "每3小時", 8: "每8小時", 24: "每日" };
 const priColor = p => (p === 0 ? C.red : p === 1 ? C.orange : C.blue);
 
 const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [] });
@@ -183,6 +190,9 @@ export default function HermesDashboard() {
   const [wigSugs, setWigSugs] = useState([]); // v12：WIG 板 AI 建議
   const [wigSugLoading, setWigSugLoading] = useState(false);
   const [wigSugErr, setWigSugErr] = useState("");
+  const [remindFor, setRemindFor] = useState(null); // v13：設緊提醒嘅任務 id
+  const [remindDraft, setRemindDraft] = useState("");
+  const [remindRepeat, setRemindRepeat] = useState(null); // null=一次 | 1 | 3 | 8 | 24
   // ✨ AI 助手
   const [aiOpen, setAiOpen] = useState(false);
   const [aiMsgs, setAiMsgs] = useState([]);
@@ -194,6 +204,35 @@ export default function HermesDashboard() {
   const aiEndRef = useRef(null);
 
   useEffect(() => { if (aiOpen) aiEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [aiMsgs, aiLoading, aiOpen]);
+
+  // v13：提醒鬧鐘 — 每 30 秒檢查一次；app 開住先會彈通知（網頁限制）
+  useEffect(() => {
+    const t = setInterval(() => {
+      setState(prev => {
+        if (!prev) return prev;
+        const now = Date.now();
+        let changed = false;
+        const tasks = prev.tasks.map(k => {
+          if (!k.remindAt || k.remindFired || k.status === "done") return k;
+          const at = new Date(k.remindAt).getTime();
+          if (at > now) return k;
+          changed = true;
+          try { if (typeof Notification !== "undefined" && Notification.permission === "granted") new Notification("⏰ Hermes 提醒", { body: k.title }); } catch {}
+          if (k.remindEvery) {
+            let next = at;
+            while (next <= now) next += k.remindEvery * 3600000;
+            return { ...k, remindAt: new Date(next).toISOString() };
+          }
+          return { ...k, remindFired: true };
+        });
+        if (!changed) return prev;
+        const n = { ...prev, tasks };
+        persist(n);
+        return n;
+      });
+    }, 30000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -400,6 +439,9 @@ export default function HermesDashboard() {
     setPingStatus({ ok: okA, msg: lines.join("\n") + verdict });
   }
   const lineDescStr = () => cfg.lines.map(l => `${l.id}=${l.emoji}${l.label}（${l.tier === "focus" ? "主攻" : "次要"}）`).join("、") + "、personal=🧍個人";
+
+  // v13：第一次設提醒時問攞通知權限
+  function ensureNotifPerm() { try { if (typeof Notification !== "undefined" && Notification.permission === "default") Notification.requestPermission(); } catch {} }
 
   // ═══ v12：AI 建議評分 — 記低你嘅口味，餵返俾 AI ═══
   function logRating(kind, title, score) {
@@ -637,6 +679,18 @@ export default function HermesDashboard() {
               {k.sm && !smPublishDay && <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.blueSoft, color: C.blue }}>發布窗 Mon–Fri</span>}
               {k.status === "skip" && <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.orangeSoft, color: C.orange }}>⏭️ {k.reason}</span>}
               {k.status === "delegate" && <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.blueSoft, color: C.blue }}>📤 {k.assignee} · 死線 {fmtMD(k.deadline)}{k.received ? " · 已收貨 ✓" : ""}</span>}
+              {/* v13：提醒標籤／入口 */}
+              {k.remindAt && (
+                <span onClick={e => { e.stopPropagation(); setRemindFor(remindFor === k.id ? null : k.id); setRemindDraft(toLocalInput(new Date(k.remindAt))); setRemindRepeat(k.remindEvery ?? null); }}
+                  className="text-xs rounded-full px-2 py-0.5 font-semibold"
+                  style={{ background: (k.remindFired || new Date(k.remindAt) <= new Date()) ? C.redSoft : C.greenSoft, color: (k.remindFired || new Date(k.remindAt) <= new Date()) ? C.red : C.green, cursor: "pointer" }}>
+                  {(k.remindFired || new Date(k.remindAt) <= new Date()) ? "🔔 到鐘" : "⏰"} {fmtDT(k.remindAt)}{k.remindEvery ? `・${REPEAT_LABELS[k.remindEvery]}` : ""}
+                </span>
+              )}
+              {!closed && !k.remindAt && (
+                <span onClick={e => { e.stopPropagation(); setRemindFor(remindFor === k.id ? null : k.id); setRemindDraft(toLocalInput(new Date(Date.now() + 3600000))); setRemindRepeat(null); }}
+                  className="text-xs rounded-full px-2 py-0.5" style={{ background: C.bg, color: C.sub, cursor: "pointer" }}>⏰ 提醒</span>
+              )}
             </div>
           </div>
           {!closed ? (
@@ -657,6 +711,20 @@ export default function HermesDashboard() {
             <Chip bg={C.redSoft} fg={C.red} onClick={() => splitTask(k)}>{splitFor === k.id ? "拆緊…" : "✂️ 拆細 ×2"}</Chip>
             <span className="text-xs" style={{ color: C.sub }}>做極唔完 → AI 拆做 2 個更細任務</span>
             {splitErr && splitErr.id === k.id && <span className="text-xs" style={{ color: C.red }}>{splitErr.msg}</span>}
+          </div>
+        )}
+
+        {/* v13：提醒設定面板 */}
+        {remindFor === k.id && !closed && (
+          <div className="flex gap-1.5 mt-2 items-center flex-wrap">
+            <input type="datetime-local" value={remindDraft} onChange={e => setRemindDraft(e.target.value)}
+              className="px-2 py-1.5 text-sm" style={{ border: "none", borderRadius: 10, background: C.bg, color: C.body, outline: "none", fontSize: 16 }} />
+            {[[null, "一次"], [1, "每1小時"], [3, "每3小時"], [8, "每8小時"], [24, "每日"]].map(([v, l]) => (
+              <Chip key={l} bg={remindRepeat === v ? C.blue : C.bg} fg={remindRepeat === v ? "#fff" : C.sub} onClick={() => setRemindRepeat(v)}>{l}</Chip>
+            ))}
+            <Chip bg={C.green} fg="#fff" onClick={() => { if (!remindDraft) return; setTask(k.id, { remindAt: new Date(remindDraft).toISOString(), remindEvery: remindRepeat, remindFired: false }); ensureNotifPerm(); setRemindFor(null); }}>設定</Chip>
+            {k.remindAt && <Chip bg={C.redSoft} fg={C.red} onClick={() => { setTask(k.id, { remindAt: null, remindEvery: null, remindFired: false }); setRemindFor(null); }}>清除</Chip>}
+            <Chip bg={C.bg} fg={C.sub} onClick={() => setRemindFor(null)}>✕</Chip>
           </div>
         )}
 
@@ -815,6 +883,43 @@ export default function HermesDashboard() {
             </Card>
           ))}
         </div>
+
+        {/* 🔔 提醒清單（v13）— 所有提醒 + PIC 委派死線 */}
+        {(() => {
+          const rem = state.tasks.filter(k => k.remindAt && k.status !== "done").sort((a, b) => a.remindAt.localeCompare(b.remindAt));
+          const pic = state.tasks.filter(k => k.status === "delegate" && !k.received && k.deadline).sort((a, b) => a.deadline.localeCompare(b.deadline));
+          return (
+            <>
+              <div className="mt-5 px-1"><SectionHeader>🔔 提醒清單 · {rem.length + pic.length}</SectionHeader></div>
+              <Card style={{ marginTop: 8, overflow: "hidden" }}>
+                {rem.length === 0 && pic.length === 0 && (
+                  <p className="text-xs px-3 py-3" style={{ color: C.sub }}>未有提醒 — 喺「今日」任務標籤度撳「⏰ 提醒」設定；委派任務嘅死線會自動出現喺度。</p>
+                )}
+                {rem.map((k, i) => {
+                  const dued = k.remindFired || new Date(k.remindAt) <= new Date();
+                  return (
+                    <div key={k.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+                      <span style={{ fontSize: 15, flexShrink: 0 }}>{dued ? "🔔" : "⏰"}</span>
+                      <span className="flex-1 text-sm min-w-0" style={{ color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k.title}</span>
+                      <span className="text-xs font-semibold" style={{ color: dued ? C.red : C.blue, whiteSpace: "nowrap", flexShrink: 0 }}>{dued ? "到鐘 · " : ""}{fmtDT(k.remindAt)}{k.remindEvery ? `・${REPEAT_LABELS[k.remindEvery]}` : ""}</span>
+                    </div>
+                  );
+                })}
+                {pic.map((k, i) => {
+                  const od = k.deadline < todayStr();
+                  return (
+                    <div key={k.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: (i > 0 || rem.length > 0) ? `1px solid ${C.line}` : "none" }}>
+                      <span style={{ fontSize: 15, flexShrink: 0 }}>📤</span>
+                      <span className="flex-1 text-sm min-w-0" style={{ color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k.title} <span style={{ color: C.sub }}>（{k.assignee}）</span></span>
+                      <span className="text-xs font-semibold" style={{ color: od ? C.red : C.orange, whiteSpace: "nowrap", flexShrink: 0 }}>{od ? "逾期 · " : "死線 "}{fmtMD(k.deadline)}</span>
+                    </div>
+                  );
+                })}
+              </Card>
+              {(rem.length > 0 || pic.length > 0) && <p className="text-xs mt-1.5 px-1" style={{ color: C.sub }}>📎 網頁限制：彈通知只喺 app 開住時先響；到鐘會喺呢度＋任務標籤轉紅，重複提醒會自動排下一輪。</p>}
+            </>
+          );
+        })()}
 
         {/* 14 日趨勢 */}
         {state.history.length > 0 && (
@@ -1035,7 +1140,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v12</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v13</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
