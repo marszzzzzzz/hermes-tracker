@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v12：🌱 延伸建議可以俾 1–5 ★ 評分 — 評分會記低（最近 100 次），
+//      以後 AI 出建議會參考你嘅口味（高分嗰類多啲、低分嗰類避開）；
+//      WIG 追蹤板可編輯（✏️ 改名、撳 P 轉優先級、撳期切換、🗑️ 刪除）；
+//      WIG 板加「🌱 AI 建議」— AI 睇住你而家啲 WIG 同業務狀態建議新 WIG。
 // v11：任務名可以編輯（撳任務名 → 改 → ✓）；🌱 延伸 ×2 升做 ×3；
 //      延伸建議度加「✍️ 其他」自己打任務；修正打字期間 input 失焦嘅 bug
 //      （內部 component 每次 render 重新建立導致 remount — 改用直接函數呼叫）。
@@ -89,7 +93,7 @@ const snapToWindow = (iso, win) => { if (!win) return iso; const d = new Date(is
 const fmtMD = iso => (iso ? `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}` : "");
 const priColor = p => (p === 0 ? C.red : p === 1 ? C.orange : C.blue);
 
-const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [] });
+const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [] });
 
 function rates(s, cfg) {
   const biz = s.tasks.filter(k => k.line !== "personal" && k.status !== "delegate");
@@ -117,6 +121,18 @@ function rollover(s, cfg) {
 }
 
 // ── Activity Rings（Apple Fitness 風格）──
+// ── ★ 1–5 評分（v12：AI 建議評分）──
+function Stars({ value, onRate }) {
+  return (
+    <span style={{ whiteSpace: "nowrap", lineHeight: 1 }}>
+      {[1, 2, 3, 4, 5].map(n => (
+        <span key={n} onClick={e => { e.stopPropagation(); onRate(n); }}
+          style={{ cursor: "pointer", fontSize: 15, color: n <= (value || 0) ? "#FF9500" : "rgba(60,60,67,0.25)", padding: "2px 1.5px", WebkitTapHighlightColor: "transparent" }}>★</span>
+      ))}
+    </span>
+  );
+}
+
 function Rings({ rows }) {
   const size = 156, cx = size / 2, cy = size / 2, sw = 13;
   const radii = [64, 47, 30];
@@ -162,6 +178,11 @@ export default function HermesDashboard() {
   const [wigDraft, setWigDraft] = useState("");
   const [wigTerm, setWigTerm] = useState("短");
   const [wigPri, setWigPri] = useState(1);
+  const [wigEditId, setWigEditId] = useState(null); // v12：編輯緊邊個 WIG
+  const [wigEditDraft, setWigEditDraft] = useState("");
+  const [wigSugs, setWigSugs] = useState([]); // v12：WIG 板 AI 建議
+  const [wigSugLoading, setWigSugLoading] = useState(false);
+  const [wigSugErr, setWigSugErr] = useState("");
   // ✨ AI 助手
   const [aiOpen, setAiOpen] = useState(false);
   const [aiMsgs, setAiMsgs] = useState([]);
@@ -380,13 +401,26 @@ export default function HermesDashboard() {
   }
   const lineDescStr = () => cfg.lines.map(l => `${l.id}=${l.emoji}${l.label}（${l.tier === "focus" ? "主攻" : "次要"}）`).join("、") + "、personal=🧍個人";
 
+  // ═══ v12：AI 建議評分 — 記低你嘅口味，餵返俾 AI ═══
+  function logRating(kind, title, score) {
+    mutate(s => ({ ...s, aiRatings: [...(s.aiRatings || []).filter(r => !(r.kind === kind && r.title === title)), { kind, title, score, date: todayStr() }].slice(-100) }));
+  }
+  function ratingContext() {
+    const rs = state.aiRatings || [];
+    if (!rs.length) return "";
+    const avg = (rs.reduce((a, r) => a + r.score, 0) / rs.length).toFixed(1);
+    const hi = rs.filter(r => r.score >= 4).slice(-3).map(r => `「${r.title}」`);
+    const lo = rs.filter(r => r.score <= 2).slice(-3).map(r => `「${r.title}」`);
+    return `\n\n用戶對你過往建議嘅評分：平均 ${avg}/5（共 ${rs.length} 次）。${hi.length ? `高分例子（多啲呢類）：${hi.join("、")}。` : ""}${lo.length ? `低分例子（避開呢類）：${lo.join("、")}。` : ""}`;
+  }
+
   // 🌱 延伸 ×2 — 直接問 Claude（v9：唔再靠 /api/extend 後端）
   async function fetchExtensions(k) {
     setExtFor(k.id); setExtLoading(true); setExtSugs([]); setExtErr("");
     try {
       const raw = await callAI({
         maxTokens: 1000,
-        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]`,
+        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]${ratingContext()}`,
         messages: [{ role: "user", content: `完成咗：「${k.title}」（業務線：${k.line}）。建議 3 個延伸任務。` }],
       });
       const arr = pickJSON(raw);
@@ -394,6 +428,23 @@ export default function HermesDashboard() {
       if (!arr.length) setExtErr("AI 無俾到建議 — 可以手動加");
     } catch (e) { setExtErr("AI 延伸失敗：" + String(e.message || e).slice(0, 90)); }
     setExtLoading(false);
+  }
+
+  // 🌱 v12：WIG 板 AI 建議 — 睇住而家啲 WIG 同業務狀態，建議新 WIG
+  async function fetchWigSugs() {
+    setWigSugLoading(true); setWigSugs([]); setWigSugErr("");
+    try {
+      const rr = rates(state, cfg);
+      const raw = await callAI({
+        maxTokens: 800,
+        system: `你係 WIG（Wildly Important Goal）教練。根據用戶而家嘅 WIG 進度同業務狀態，建議 3 個新嘅短期 WIG。格式：「從 X 到 Y」或者明確可量度目標，用廣東話，每個 ≤20 字。業務線：${lineDescStr()}。淨係回覆 JSON array，唔好有任何其他文字：[{"label":"..."},{"label":"..."},{"label":"..."}]${ratingContext()}`,
+        messages: [{ role: "user", content: `而家 WIG：${state.wigs.map(w => `${w.done ? "✓" : "○"}P${w.pri} ${w.label}`).join("；") || "（空）"}。今日業務完成率 ${rr.bizPct}%，主攻佔比 ${rr.focusShare}%。建議 3 個新 WIG。` }],
+      });
+      const arr = pickJSON(raw).filter(x => x && x.label).slice(0, 3);
+      setWigSugs(arr);
+      if (!arr.length) setWigSugErr("AI 無俾到建議 — 可以手動 ＋ WIG");
+    } catch (e) { setWigSugErr("AI 建議失敗：" + String(e.message || e).slice(0, 90)); }
+    setWigSugLoading(false);
   }
 
   // ✂️ 拆細 ×2 — 直接問 Claude（v9：唔再靠 /api/split 後端）
@@ -648,9 +699,15 @@ export default function HermesDashboard() {
             {extSugs.map((sg, i) => {
               const m = cfg.lines.find(l => l.id === sg.line) || cfg.lines.find(l => l.id === k.line) || cfg.lines[0];
               return (
-                <div key={i} className="flex items-center gap-2 px-2.5 py-2" style={{ background: C.blueSoft, borderRadius: 12 }}>
-                  <span className="text-xs flex-1" style={{ color: C.body }}>{m.emoji} {sg.title}</span>
-                  <Chip bg={C.blue} fg="#fff" onClick={() => { mutate(s => ({ ...s, tasks: [...s.tasks, mk(m.id, sg.title, m.tier === "focus", { ext: true })] })); setExtSugs(p => p.filter((_, j) => j !== i)); }}>＋加入</Chip>
+                <div key={i} className="px-2.5 py-2" style={{ background: C.blueSoft, borderRadius: 12 }}>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs flex-1" style={{ color: C.body }}>{m.emoji} {sg.title}</span>
+                    <Chip bg={C.blue} fg="#fff" onClick={() => { mutate(s => ({ ...s, tasks: [...s.tasks, mk(m.id, sg.title, m.tier === "focus", { ext: true })] })); setExtSugs(p => p.filter((_, j) => j !== i)); }}>＋加入</Chip>
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-xs" style={{ color: C.sub }}>呢個建議好唔好：</span>
+                    <Stars value={sg.score} onRate={n => { setExtSugs(p => p.map((x, j) => (j === i ? { ...x, score: n } : x))); logRating("ext", sg.title, n); }} />
+                  </div>
                 </div>
               );
             })}
@@ -781,13 +838,31 @@ export default function HermesDashboard() {
         {/* WIG 追蹤板 */}
         <div className="flex items-center justify-between mt-5 px-1">
           <SectionHeader>🎯 WIG 追蹤板 · {state.wigs.filter(w => w.done).length}/{state.wigs.length}</SectionHeader>
-          {state.wigs.length < 6 && <button onClick={() => setWigAdding(!wigAdding)} className="text-xs font-semibold" style={{ color: C.blue, background: "none", border: "none" }}>＋ WIG</button>}
+          <div className="flex gap-2 items-center">
+            <button onClick={fetchWigSugs} className="text-xs font-semibold" style={{ color: C.green, background: "none", border: "none" }}>{wigSugLoading ? "諗緊…" : "🌱 AI 建議"}</button>
+            {state.wigs.length < 6 && <button onClick={() => setWigAdding(!wigAdding)} className="text-xs font-semibold" style={{ color: C.blue, background: "none", border: "none" }}>＋ WIG</button>}
+          </div>
         </div>
         <Card style={{ marginTop: 8, overflow: "hidden" }}>
           <div style={{ height: 4, background: C.bg }}>
             <div style={{ height: 4, width: `${state.wigs.length ? (100 * state.wigs.filter(w => w.done).length) / state.wigs.length : 0}%`, background: C.green, transition: "width .3s" }} />
           </div>
-          {state.wigs.map((w, i) => (
+          {state.wigs.map((w, i) => wigEditId === w.id ? (
+            /* v12：WIG 編輯模式 — 改名／撳 P 轉優先級／撳期切換／🗑️ 刪除 */
+            <div key={w.id} className="flex items-center gap-1.5 px-3 py-2 flex-wrap" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+              <input autoFocus value={wigEditDraft} onChange={e => setWigEditDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && wigEditDraft.trim()) { mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, label: wigEditDraft.trim() } : x)) })); setWigEditId(null); }
+                  if (e.key === "Escape") setWigEditId(null);
+                }}
+                className="flex-1 min-w-0 px-2 py-1.5 text-sm"
+                style={{ border: `1.5px solid ${C.blue}`, borderRadius: 10, background: C.bg, color: C.body, outline: "none", fontSize: 16, minWidth: 140 }} />
+              <Chip bg={priColor(w.pri)} fg="#fff" onClick={() => mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, pri: (x.pri + 1) % 5 } : x)) }))}>P{w.pri}</Chip>
+              <Chip bg={C.bg} fg={C.sub} onClick={() => mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, term: x.term === "短" ? "長" : "短" } : x)) }))}>{w.term}期</Chip>
+              <Chip bg={C.redSoft} fg={C.red} onClick={() => { mutate(s => ({ ...s, wigs: s.wigs.filter(x => x.id !== w.id) })); setWigEditId(null); }}>🗑️</Chip>
+              <Chip bg={C.blue} fg="#fff" onClick={() => { if (wigEditDraft.trim()) mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, label: wigEditDraft.trim() } : x)) })); setWigEditId(null); }}>✓</Chip>
+            </div>
+          ) : (
             <button key={w.id} onClick={() => mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, done: !x.done } : x)) }))}
               className="w-full flex items-center gap-2.5 text-left px-3"
               style={{ minHeight: 46, background: "none", border: "none", borderTop: i > 0 ? `1px solid ${C.line}` : "none", WebkitTapHighlightColor: "transparent" }}>
@@ -797,9 +872,33 @@ export default function HermesDashboard() {
               <span className="flex-1 text-sm" style={{ color: w.done ? C.sub : C.body, textDecoration: w.done ? "line-through" : "none" }}>{w.label}</span>
               <span className="text-xs font-bold rounded-full px-1.5" style={{ background: priColor(w.pri), color: "#fff", fontSize: 10, padding: "2px 7px" }}>P{w.pri}</span>
               <span className="text-xs rounded-full" style={{ background: C.bg, color: C.sub, fontSize: 10, padding: "2px 7px" }}>{w.term}期</span>
+              <span onClick={e => { e.stopPropagation(); setWigEditId(w.id); setWigEditDraft(w.label); }} style={{ padding: 5, color: C.sub, opacity: 0.6 }}><Pencil size={13} /></span>
             </button>
           ))}
         </Card>
+        {/* v12：WIG AI 建議（連 ★ 評分）*/}
+        {(wigSugLoading || wigSugErr || wigSugs.length > 0) && (
+          <div className="flex flex-col gap-1.5 mt-2">
+            {wigSugLoading && <p className="text-xs px-1" style={{ color: C.sub }}>AI 諗緊 3 個新 WIG…</p>}
+            {wigSugErr && <p className="text-xs px-1" style={{ color: C.red }}>{wigSugErr}</p>}
+            {wigSugs.map((sg, i) => (
+              <div key={i} className="px-2.5 py-2" style={{ background: C.greenSoft, borderRadius: 12 }}>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs flex-1" style={{ color: C.body }}>🎯 {sg.label}</span>
+                  {state.wigs.length < 6 ? (
+                    <Chip bg={C.green} fg="#fff" onClick={() => { mutate(s => ({ ...s, wigs: [...s.wigs, { id: uid(), label: sg.label, term: "短", pri: 1, done: false }] })); setWigSugs(p => p.filter((_, j) => j !== i)); }}>＋加入</Chip>
+                  ) : (
+                    <span className="text-xs" style={{ color: C.sub }}>WIG 已滿 6</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 mt-1">
+                  <span className="text-xs" style={{ color: C.sub }}>呢個建議好唔好：</span>
+                  <Stars value={sg.score} onRate={n => { setWigSugs(p => p.map((x, j) => (j === i ? { ...x, score: n } : x))); logRating("wig", sg.label, n); }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
         {wigAdding && (
           <div className="flex gap-1.5 mt-2 items-center flex-wrap">
             <input value={wigDraft} onChange={e => setWigDraft(e.target.value)} placeholder="新 WIG（從 X 到 Y，何時前）"
@@ -894,7 +993,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -936,7 +1035,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v11</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v12</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
