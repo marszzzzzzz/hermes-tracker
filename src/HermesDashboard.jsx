@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from "react";
-import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart } from "lucide-react";
+import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v11：任務名可以編輯（撳任務名 → 改 → ✓）；🌱 延伸 ×2 升做 ×3；
+//      延伸建議度加「✍️ 其他」自己打任務；修正打字期間 input 失焦嘅 bug
+//      （內部 component 每次 render 重新建立導致 remount — 改用直接函數呼叫）。
 // v10.4：雙環境儲存 — artifact 有 window.storage 就用佢；
 // 獨立網頁（Vite/GitHub Pages/Wix 自己 host）自動 fallback 去 localStorage，
 // 咁同一份 file 喺 artifact 內外都行到，儲存兩邊都通。
@@ -150,6 +153,9 @@ export default function HermesDashboard() {
   const [extLoading, setExtLoading] = useState(false);
   const [extSugs, setExtSugs] = useState([]);
   const [extErr, setExtErr] = useState("");
+  const [extCustom, setExtCustom] = useState(""); // v11：延伸「✍️ 其他」自己打
+  const [editingId, setEditingId] = useState(null); // v11：編輯緊邊個任務
+  const [editDraft, setEditDraft] = useState("");
   const [splitFor, setSplitFor] = useState(null);
   const [splitErr, setSplitErr] = useState(null); // { id, msg }
   const [wigAdding, setWigAdding] = useState(false);
@@ -380,11 +386,11 @@ export default function HermesDashboard() {
     try {
       const raw = await callAI({
         maxTokens: 1000,
-        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 2 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."}]`,
-        messages: [{ role: "user", content: `完成咗：「${k.title}」（業務線：${k.line}）。建議 2 個延伸任務。` }],
+        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]`,
+        messages: [{ role: "user", content: `完成咗：「${k.title}」（業務線：${k.line}）。建議 3 個延伸任務。` }],
       });
       const arr = pickJSON(raw);
-      setExtSugs((Array.isArray(arr) ? arr : []).filter(x => x && x.title).slice(0, 2));
+      setExtSugs((Array.isArray(arr) ? arr : []).filter(x => x && x.title).slice(0, 3));
       if (!arr.length) setExtErr("AI 無俾到建議 — 可以手動加");
     } catch (e) { setExtErr("AI 延伸失敗：" + String(e.message || e).slice(0, 90)); }
     setExtLoading(false);
@@ -555,9 +561,24 @@ export default function HermesDashboard() {
       <div className="px-3 py-2.5" style={{ background: C.card, borderRadius: 14, boxShadow: SHADOW, borderLeft: flagged ? `3px solid ${C.red}` : "3px solid transparent" }}>
         <div className="flex items-center gap-2">
           <div className="flex-1 min-w-0">
-            <div className="text-sm leading-snug" style={{ color: closed && k.status !== "delegate" ? C.sub : C.body, textDecoration: k.status === "done" ? "line-through" : "none" }}>
-              {k.focus && <Flame size={13} style={{ display: "inline", color: C.pink, verticalAlign: "-2px", marginRight: 3 }} />}{k.title}
-            </div>
+            {editingId === k.id ? (
+              <div className="flex gap-1.5 items-center">
+                <input autoFocus value={editDraft} onChange={e => setEditDraft(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter" && editDraft.trim()) { setTask(k.id, { title: editDraft.trim() }); setEditingId(null); }
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  className="flex-1 min-w-0 px-2 py-1.5 text-sm"
+                  style={{ border: `1.5px solid ${C.blue}`, borderRadius: 10, background: C.bg, color: C.body, outline: "none", fontSize: 16 }} />
+                <Chip bg={C.blue} fg="#fff" onClick={() => { if (editDraft.trim()) setTask(k.id, { title: editDraft.trim() }); setEditingId(null); }}>✓</Chip>
+                <Chip bg={C.bg} fg={C.sub} onClick={() => setEditingId(null)}>✕</Chip>
+              </div>
+            ) : (
+              <div className="text-sm leading-snug" onClick={() => { setEditingId(k.id); setEditDraft(k.title); }} style={{ color: closed && k.status !== "delegate" ? C.sub : C.body, textDecoration: k.status === "done" ? "line-through" : "none", cursor: "pointer", WebkitTapHighlightColor: "transparent" }}>
+                {k.focus && <Flame size={13} style={{ display: "inline", color: C.pink, verticalAlign: "-2px", marginRight: 3 }} />}{k.title}
+                <Pencil size={11} style={{ display: "inline", marginLeft: 5, color: C.sub, verticalAlign: "-1px", opacity: 0.5 }} />
+              </div>
+            )}
             <div className="flex flex-wrap gap-1.5 mt-1">
               {k.red > 0 && !closed && <span className="text-xs font-semibold rounded-full px-2 py-0.5" style={{ background: C.redSoft, color: C.red }}>🔴 連紅 {k.red} 日{k.red >= 2 ? " · 週六檢討" : ""}</span>}
               {k.due && k.status === "open" && <span className="text-xs rounded-full px-2 py-0.5" style={{ background: overdue ? C.redSoft : C.blueSoft, color: overdue ? C.red : C.blue }}>⏰ {fmtMD(k.due)}{overdue ? " 逾期" : ""}</span>}
@@ -617,12 +638,12 @@ export default function HermesDashboard() {
             {!k.score ? (<><span className="text-xs" style={{ color: C.sub }}>影響：</span>{[1, 2, 3].map(n => <Chip key={n} bg={C.greenSoft} fg={C.green} onClick={() => setTask(k.id, { score: n })}>{"⭐".repeat(n)}</Chip>)}</>) : (
               <span className="text-xs rounded-full px-2 py-1 font-semibold" style={{ background: C.greenSoft, color: C.green }}>{"⭐".repeat(k.score)}</span>
             )}
-            <Chip bg={C.blueSoft} fg={C.blue} onClick={() => (extFor === k.id ? setExtFor(null) : fetchExtensions(k))}>🌱 延伸 ×2</Chip>
+            <Chip bg={C.blueSoft} fg={C.blue} onClick={() => (extFor === k.id ? setExtFor(null) : fetchExtensions(k))}>🌱 延伸 ×3</Chip>
           </div>
         )}
         {extFor === k.id && k.status === "done" && (
           <div className="mt-2 flex flex-col gap-1.5">
-            {extLoading && <p className="text-xs" style={{ color: C.sub }}>AI 諗緊 2 個延伸方向…</p>}
+            {extLoading && <p className="text-xs" style={{ color: C.sub }}>AI 諗緊 3 個延伸方向…</p>}
             {extErr && <p className="text-xs" style={{ color: C.red }}>{extErr}</p>}
             {extSugs.map((sg, i) => {
               const m = cfg.lines.find(l => l.id === sg.line) || cfg.lines.find(l => l.id === k.line) || cfg.lines[0];
@@ -633,6 +654,16 @@ export default function HermesDashboard() {
                 </div>
               );
             })}
+            {/* v11：✍️ 其他 — 自己打延伸任務 */}
+            {!extLoading && (
+              <div className="flex items-center gap-2 px-2.5 py-1.5" style={{ background: C.bg, borderRadius: 12 }}>
+                <span className="text-xs" style={{ color: C.sub }}>✍️</span>
+                <input value={extCustom} onChange={e => setExtCustom(e.target.value)} placeholder="其他 — 自己打延伸任務…"
+                  onKeyDown={e => { if (e.key === "Enter" && extCustom.trim()) { mutate(s => ({ ...s, tasks: [...s.tasks, mk(k.line, extCustom.trim(), k.focus, { ext: true })] })); setExtCustom(""); } }}
+                  className="flex-1 min-w-0 text-sm py-1" style={{ border: "none", background: "transparent", outline: "none", color: C.body, fontSize: 16 }} />
+                <Chip bg={C.blue} fg="#fff" onClick={() => { if (!extCustom.trim()) return; mutate(s => ({ ...s, tasks: [...s.tasks, mk(k.line, extCustom.trim(), k.focus, { ext: true })] })); setExtCustom(""); }}>＋加入</Chip>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -663,7 +694,7 @@ export default function HermesDashboard() {
           </div>
         </div>
         <div className="flex flex-col gap-2 mt-2">
-          {list.map(k => <TaskRow key={k.id} k={k} />)}
+          {list.map(k => <div key={k.id}>{TaskRow({ k })}</div>)}
           {list.length === 0 && <p className="text-xs px-1" style={{ color: C.sub }}>今日未有任務 — 由下面建議揀，或者 ＋ 自己加。</p>}
         </div>
         {pool.length > 0 && (
@@ -889,8 +920,8 @@ export default function HermesDashboard() {
           <span className="text-xs font-semibold" style={{ color: C.blue }}>儀表板 ›</span>
         </button>
 
-        {cfg.lines.map(l => <Section key={l.id} lineId={l.id} />)}
-        <Section isPersonal />
+        {cfg.lines.map(l => <div key={l.id}>{Section({ lineId: l.id })}</div>)}
+        {Section({ isPersonal: true })}
       </>
     );
   }
@@ -905,7 +936,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v10.4</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v11</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
@@ -917,7 +948,7 @@ export default function HermesDashboard() {
       </div>
 
       <div className="mx-auto px-4" style={{ maxWidth: 480, paddingBottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 24px)` }}>
-        {tab === "today" ? <TodayView /> : <DashView />}
+        {tab === "today" ? TodayView() : DashView()}
       </div>
 
       {/* ✨ AI 助手面板 */}
