@@ -1,6 +1,12 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v14：🗺️ 36 個目標路線圖 — WIG 打勾完成即刻封存出 WIG board，存入路線圖
+//      （連 6 格上限即時騰返個位），路線圖顯示 X/36 進度＋完成日期，
+//      6 秒內可 ↩️ 復原。舊資料入面已經 done 嘅 WIG 開機自動搬一次。
+//      ✨ AI 助手偵測「收工報告」格式（user 貼入嚟或者 AI 覆述都得）—
+//      一認到就喺條 message 底下彈「套用去 task list + WIG」掣，
+//      一撳就將 ✅/⏭️/📤/🔴 同 WIG ✓/○ 逐條 match 返做狀態更新。
 // v13：任務可以設 ⏰ 提醒（日期時間＋一次／每1小時／每3小時／每8小時／每日）；
 //      儀表板新增「🔔 提醒清單」— 齊晒所有提醒 + 每個 PIC 委派任務嘅死線；
 //      到鐘會轉紅＋（app 開住時）彈瀏覽器通知；重複提醒自動排下一輪。
@@ -100,7 +106,54 @@ const toLocalInput = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStar
 const REPEAT_LABELS = { 1: "每1小時", 3: "每3小時", 8: "每8小時", 24: "每日" };
 const priColor = p => (p === 0 ? C.red : p === 1 ? C.orange : C.blue);
 
-const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [] });
+// 🗺️ v14：36 個目標路線圖 — 固定目標數，唔開俾用戶自訂
+const ROADMAP_GOAL = 36;
+
+// ✂️ v14：解構收工報告文字用嘅 emoji 前綴
+const stripLeadEmoji = (s, times = 1) => {
+  let out = (s || "").trim();
+  for (let i = 0; i < times; i++) {
+    const m = out.match(/^\p{Extended_Pictographic}️?\s*/u);
+    if (m) out = out.slice(m[0].length).trim(); else break;
+  }
+  return out;
+};
+const looksLikeReport = text => typeof text === "string" && /收工報告/.test(text) && /WIG/.test(text);
+// 將一份收工報告文字解構做 [{kind:"task"|"wig", ...}]，俾 applyReportSync 逐條 match 返落 state
+function parseReportSync(text) {
+  const lines = (text || "").split("\n").map(l => l.trim()).filter(Boolean);
+  let section = null;
+  const items = [];
+  for (const line of lines) {
+    if (/──/.test(line) && /今日任務/.test(line)) { section = "tasks"; continue; }
+    if (/──/.test(line) && /WIG/.test(line)) { section = "wigs"; continue; }
+    if (section === "tasks") {
+      if (line.startsWith("✅")) {
+        const rest = stripLeadEmoji(line.slice(1), 1);
+        const m = rest.match(/^(.*?)(?:（([⭐]+)）)?$/);
+        items.push({ kind: "task", status: "done", title: (m ? m[1] : rest).trim(), score: m && m[2] ? m[2].length : null });
+      } else if (line.startsWith("⏭")) {
+        const rest = stripLeadEmoji(line.replace(/^⏭️?/, ""), 1);
+        const m = rest.match(/^(.*?)（(.+?)）$/);
+        items.push({ kind: "task", status: "skip", title: (m ? m[1] : rest).trim(), reason: m ? m[2] : null });
+      } else if (line.startsWith("📤")) {
+        const rest = stripLeadEmoji(line.slice(2), 1);
+        const m = rest.match(/^(.*?)\s*→\s*(\S+)・死線\s*([\d/]+)(・已收貨\s*✓)?/);
+        if (m) items.push({ kind: "task", status: "delegate", title: m[1].trim(), assignee: m[2], received: !!m[4] });
+      } else if (line.startsWith("🔴")) {
+        const rest = stripLeadEmoji(line.slice(2), 1);
+        const m = rest.match(/^(.*?)(?:（連紅.*?）)?$/);
+        items.push({ kind: "task", status: "open", title: (m ? m[1] : rest).trim() });
+      }
+    } else if (section === "wigs") {
+      const m = line.match(/^(✓|○)\s*P(\d)（(.+?)期）(.+)$/);
+      if (m) items.push({ kind: "wig", done: m[1] === "✓", pri: +m[2], term: m[3], label: m[4].trim() });
+    }
+  }
+  return items;
+}
+
+const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [] });
 
 function rates(s, cfg) {
   const biz = s.tasks.filter(k => k.line !== "personal" && k.status !== "delegate");
@@ -193,12 +246,16 @@ export default function HermesDashboard() {
   const [remindFor, setRemindFor] = useState(null); // v13：設緊提醒嘅任務 id
   const [remindDraft, setRemindDraft] = useState("");
   const [remindRepeat, setRemindRepeat] = useState(null); // null=一次 | 1 | 3 | 8 | 24
+  // 🗺️ v14：WIG 封存去路線圖之後嘅 ↩️ 復原 toast
+  const [archivedToast, setArchivedToast] = useState(null); // { wig }
+  const archivedTimer = useRef(null);
   // ✨ AI 助手
   const [aiOpen, setAiOpen] = useState(false);
   const [aiMsgs, setAiMsgs] = useState([]);
   const [aiInput, setAiInput] = useState("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiSugs, setAiSugs] = useState([]);
+  const [syncedMsgs, setSyncedMsgs] = useState({}); // v14：邊條 message 已經套用咗收工報告 sync
   const [storageOk, setStorageOk] = useState(null); // v10.1：storage 自我檢測（null=檢緊 true=通 false=斷）
   const [pingStatus, setPingStatus] = useState(null); // v10.2：AI 連線測試 null | "testing" | {ok, msg}
   const aiEndRef = useRef(null);
@@ -265,6 +322,11 @@ export default function HermesDashboard() {
       }
       if (!s) s = freshState(c);
       if (s.date !== todayStr()) s = rollover(s, c);
+      // v14 migration：舊資料入面已經 done 嘅 WIG，開機自動搬去 36 目標路線圖
+      if ((s.wigs || []).some(w => w.done)) {
+        const donePart = s.wigs.filter(w => w.done).map(w => ({ id: w.id, label: w.label, term: w.term, pri: w.pri, doneDate: s.date }));
+        s = { ...s, wigs: s.wigs.filter(w => !w.done), roadmap: [...(s.roadmap || []), ...donePart] };
+      }
       setCfg(c); setState(s); persist(s);
       // v10.1：實測 storage 寫入＋讀返，肉眼確認持久化通唔通
       try {
@@ -297,6 +359,45 @@ export default function HermesDashboard() {
   }, []);
   function mutate(fn) { setState(prev => { const n = fn(prev); persist(n); return n; }); }
   const setTask = (id, patch) => mutate(s => ({ ...s, tasks: s.tasks.map(k => (k.id === id ? { ...k, ...patch } : k)) }));
+
+  // 🗺️ v14：WIG 打完勾即刻封存出 board，存入 36 目標路線圖（連 6 格上限即時騰位）
+  function moveWigToRoadmap(w) {
+    mutate(s => ({ ...s, wigs: s.wigs.filter(x => x.id !== w.id), roadmap: [...(s.roadmap || []), { id: w.id, label: w.label, term: w.term, pri: w.pri, doneDate: todayStr() }] }));
+    setArchivedToast({ wig: w });
+    if (archivedTimer.current) clearTimeout(archivedTimer.current);
+    archivedTimer.current = setTimeout(() => setArchivedToast(null), 6000);
+  }
+  function undoArchive() {
+    if (!archivedToast) return;
+    const w = archivedToast.wig;
+    mutate(s => ({ ...s, roadmap: (s.roadmap || []).filter(x => x.id !== w.id), wigs: [...s.wigs, { ...w, done: false }] }));
+    if (archivedTimer.current) clearTimeout(archivedTimer.current);
+    setArchivedToast(null);
+  }
+
+  // ✨ v14：將收工報告解構結果套用返落 task list + WIG（✅/⏭️/📤 逐條 match title，WIG ✓ 就封存去路線圖）
+  function applyReportSync(items, msgIdx) {
+    mutate(s => {
+      const tasks = s.tasks.map(k => {
+        const hit = items.find(it => it.kind === "task" && it.title && (it.title === k.title || k.title.includes(it.title) || it.title.includes(k.title)));
+        if (!hit) return k;
+        if (hit.status === "done") return { ...k, status: "done", score: hit.score || k.score };
+        if (hit.status === "skip") return { ...k, status: "skip", reason: hit.reason || k.reason };
+        if (hit.status === "delegate") return { ...k, status: "delegate", assignee: hit.assignee || k.assignee, received: hit.received || k.received };
+        return k;
+      });
+      const doneLabels = items.filter(it => it.kind === "wig" && it.done).map(it => it.label);
+      const stay = [];
+      let roadmap = s.roadmap || [];
+      (s.wigs || []).forEach(w => {
+        const hit = doneLabels.some(l => l === w.label || w.label.includes(l) || l.includes(w.label));
+        if (hit) roadmap = [...roadmap, { id: w.id, label: w.label, term: w.term, pri: w.pri, doneDate: todayStr() }];
+        else stay.push(w);
+      });
+      return { ...s, tasks, wigs: stay, roadmap };
+    });
+    setSyncedMsgs(p => ({ ...p, [msgIdx]: true }));
+  }
 
   function delegate(k, staff, iso) {
     const dl = snapToWindow(iso, staff.window);
@@ -520,7 +621,8 @@ export default function HermesDashboard() {
     return [
       `日期：${state.date}｜衝刺 #${cfg.sprint.num}（${cfg.sprint.start} 至 ${cfg.sprint.end}）`,
       `業務完成率 ${r.bizPct}%（目標 85）｜已關 ${r.closed}/${r.denom}｜主攻佔比 ${r.focusShare}%（目標 ${cfg.budget.focusPct}）｜Skip ${r.skips}/${cfg.skipCap}｜影響分 ${r.impact}｜個人 ${r.perPct}%｜跟收 ${r.fuDone}/${r.fuAll}｜逾期未收 ${r.overdue}`,
-      `WIG（${state.wigs.filter(w => w.done).length}/${state.wigs.length}）：${state.wigs.map(w => `${w.done ? "✓" : "○"}P${w.pri}${w.term} ${w.label}`).join("；")}`,
+      `WIG（現行 ${state.wigs.length}/6）：${state.wigs.map(w => `P${w.pri}${w.term} ${w.label}`).join("；") || "（未有 WIG，仲有位加）"}`,
+      `🗺️ 36 個目標路線圖：${(state.roadmap || []).length}/${ROADMAP_GOAL}`,
       `今日任務：${state.tasks.length ? state.tasks.map(fmt).join("\n") : "（未有任務）"}`,
       `近期完成率：${state.history.slice(-7).map(h => `${h.date.slice(5)}=${h.biz}%`).join(", ") || "（無記錄）"}`,
       `週六檢討清單：${state.reviewList.join("；") || "（空）"}`,
@@ -541,6 +643,7 @@ export default function HermesDashboard() {
           `業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完。`,
           "如果你想建議具體任務，喺回覆最尾加一段 <tasks>[{\"line\":\"store\",\"title\":\"message 2 個潛在寄賣者\"}]</tasks>（JSON array，最多 3 個，line 用上面 id）。冇具體任務建議就唔好加呢段。",
           "優先次序邏輯：連紅任務最緊要處理（拆細或委派）；主攻佔比未達標就建議主攻線任務；逾期未收要追；Skip 爆 cap 係警號。",
+          "如果 Mars 叫你出正式收工報告，必須逐字跟返呢個格式（唔好改動 emoji／分隔線／順序），因為 app 會偵測呢個格式俾佢一撳套用返落 task list：\n『📋 Hermes 收工報告 · <日期>』換行『業務完成率 X%（✅N ⏭️N 📤N）｜主攻佔比 X%（目標 X）』，然後空行、『── 今日任務（N）──』、逐條 ✅/⏭️/📤/🔴，最後空行、『── WIG X/Y ──』逐條 ✓／○ P<pri>（<期>期）<label>。",
           "以下係 Mars 今日嘅 dashboard 即時狀態：\n\n" + aiContext(),
         ].join("\n\n"),
         messages: hist.slice(-12),
@@ -589,8 +692,10 @@ export default function HermesDashboard() {
       ...(s.tasks.length === 0 ? ["（今日無任務）"] : []),
       open.length ? `⚠️ ${open.length} 個未關 — 聽日自動連紅` : `全部任務有結論 ✅`,
       ``,
-      `── WIG ${s.wigs.filter(w => w.done).length}/${s.wigs.length} ──`,
+      `── WIG 現行 ${s.wigs.length}/6 ──`,
       ...wigLines,
+      ``,
+      `🗺️ 36 個目標路線圖 ${(s.roadmap || []).length}/${ROADMAP_GOAL}`,
     ].join("\n");
   }
 
@@ -942,7 +1047,7 @@ export default function HermesDashboard() {
 
         {/* WIG 追蹤板 */}
         <div className="flex items-center justify-between mt-5 px-1">
-          <SectionHeader>🎯 WIG 追蹤板 · {state.wigs.filter(w => w.done).length}/{state.wigs.length}</SectionHeader>
+          <SectionHeader>🎯 WIG 追蹤板 · {state.wigs.length}/6</SectionHeader>
           <div className="flex gap-2 items-center">
             <button onClick={fetchWigSugs} className="text-xs font-semibold" style={{ color: C.green, background: "none", border: "none" }}>{wigSugLoading ? "諗緊…" : "🌱 AI 建議"}</button>
             {state.wigs.length < 6 && <button onClick={() => setWigAdding(!wigAdding)} className="text-xs font-semibold" style={{ color: C.blue, background: "none", border: "none" }}>＋ WIG</button>}
@@ -968,19 +1073,19 @@ export default function HermesDashboard() {
               <Chip bg={C.blue} fg="#fff" onClick={() => { if (wigEditDraft.trim()) mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, label: wigEditDraft.trim() } : x)) })); setWigEditId(null); }}>✓</Chip>
             </div>
           ) : (
-            <button key={w.id} onClick={() => mutate(s => ({ ...s, wigs: s.wigs.map(x => (x.id === w.id ? { ...x, done: !x.done } : x)) }))}
+            <button key={w.id} onClick={() => moveWigToRoadmap(w)}
               className="w-full flex items-center gap-2.5 text-left px-3"
               style={{ minHeight: 46, background: "none", border: "none", borderTop: i > 0 ? `1px solid ${C.line}` : "none", WebkitTapHighlightColor: "transparent" }}>
-              <span className="flex items-center justify-center" style={{ width: 24, height: 24, borderRadius: 12, background: w.done ? C.green : "transparent", border: w.done ? "none" : `1.5px solid ${C.sub}`, color: "#fff", flexShrink: 0 }}>
-                {w.done && <Check size={14} strokeWidth={3.5} />}
-              </span>
-              <span className="flex-1 text-sm" style={{ color: w.done ? C.sub : C.body, textDecoration: w.done ? "line-through" : "none" }}>{w.label}</span>
+              <span className="flex items-center justify-center" style={{ width: 24, height: 24, borderRadius: 12, background: "transparent", border: `1.5px solid ${C.sub}`, color: "#fff", flexShrink: 0 }} />
+              <span className="flex-1 text-sm" style={{ color: C.body }}>{w.label}</span>
               <span className="text-xs font-bold rounded-full px-1.5" style={{ background: priColor(w.pri), color: "#fff", fontSize: 10, padding: "2px 7px" }}>P{w.pri}</span>
               <span className="text-xs rounded-full" style={{ background: C.bg, color: C.sub, fontSize: 10, padding: "2px 7px" }}>{w.term}期</span>
               <span onClick={e => { e.stopPropagation(); setWigEditId(w.id); setWigEditDraft(w.label); }} style={{ padding: 5, color: C.sub, opacity: 0.6 }}><Pencil size={13} /></span>
             </button>
           ))}
+          {state.wigs.length === 0 && <p className="text-xs px-3 py-3" style={{ color: C.sub }}>未有 WIG — 撳 ＋ WIG 加一個（最多 6 個）。</p>}
         </Card>
+        <p className="text-xs mt-1.5 px-1" style={{ color: C.sub }}>撳一個 WIG＝完成 → 即刻存入下面 🗺️ 36 個目標路線圖，同時騰返個 WIG 位。</p>
         {/* v12：WIG AI 建議（連 ★ 評分）*/}
         {(wigSugLoading || wigSugErr || wigSugs.length > 0) && (
           <div className="flex flex-col gap-1.5 mt-2">
@@ -1013,6 +1118,30 @@ export default function HermesDashboard() {
             <Chip bg={C.blue} fg="#fff" onClick={() => { if (!wigDraft.trim() || state.wigs.length >= 6) return; mutate(s => ({ ...s, wigs: [...s.wigs, { id: uid(), label: wigDraft.trim(), term: wigTerm, pri: wigPri, done: false }] })); setWigDraft(""); setWigAdding(false); }}>加</Chip>
           </div>
         )}
+
+        {/* 🗺️ v14：36 個目標路線圖 — WIG 完成後封存落嚟 */}
+        <div className="flex items-center justify-between mt-5 px-1">
+          <SectionHeader color={C.green}>🗺️ 36 個目標路線圖 · {(state.roadmap || []).length}/{ROADMAP_GOAL}</SectionHeader>
+        </div>
+        <Card style={{ marginTop: 8, overflow: "hidden" }}>
+          <div style={{ height: 4, background: C.bg }}>
+            <div style={{ height: 4, width: `${Math.min(100, (100 * (state.roadmap || []).length) / ROADMAP_GOAL)}%`, background: C.green, transition: "width .3s" }} />
+          </div>
+          {(state.roadmap || []).length === 0 ? (
+            <p className="text-xs px-3 py-3" style={{ color: C.sub }}>未有 WIG 完成入路線圖 — 上面 WIG 板打勾一個就會封存落嚟。</p>
+          ) : (
+            <div style={{ maxHeight: 220, overflowY: "auto" }}>
+              {[...(state.roadmap || [])].reverse().map((w, i) => (
+                <div key={w.id} className="flex items-center gap-2.5 px-3" style={{ minHeight: 42, borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+                  <span className="flex items-center justify-center" style={{ width: 20, height: 20, borderRadius: 10, background: C.green, color: "#fff", flexShrink: 0 }}><Check size={12} strokeWidth={3.5} /></span>
+                  <span className="flex-1 text-sm" style={{ color: C.sub, textDecoration: "line-through" }}>{w.label}</span>
+                  <span className="text-xs rounded-full" style={{ background: C.bg, color: C.sub, fontSize: 10, padding: "2px 7px" }}>{w.term}期・P{w.pri}</span>
+                  <span className="text-xs" style={{ color: C.sub }}>{fmtMD(w.doneDate)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
 
         {/* 週六檢討 */}
         {(wd === cfg.reviewDay || state.reviewList.length > 0) && (
@@ -1098,7 +1227,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -1140,7 +1269,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v13</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v14</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
@@ -1171,15 +1300,28 @@ export default function HermesDashboard() {
               <p className="text-xs px-1" style={{ color: C.sub }}>我睇緊你今日嘅 dashboard — 完成率、連紅、WIG 全部知。問我點開始、點排優先，或者叫我建議任務。{!hasKey && "（本地測試：去儀表板「⚙️ AI 設定」揀 Claude／Gemini／OpenAI 入 key）"}</p>
             )}
             {aiMsgs.map((m, i) => (
-              <div key={i} className="px-3 py-2 text-sm" style={{
-                background: m.role === "user" ? C.blue : C.bg,
-                color: m.role === "user" ? "#fff" : C.body,
-                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                maxWidth: "85%", whiteSpace: "pre-wrap", lineHeight: 1.45,
-                borderRadius: 18,
-                borderBottomRightRadius: m.role === "user" ? 6 : 18,
-                borderBottomLeftRadius: m.role === "user" ? 18 : 6,
-              }}>{m.content}</div>
+              <Fragment key={i}>
+                <div className="px-3 py-2 text-sm" style={{
+                  background: m.role === "user" ? C.blue : C.bg,
+                  color: m.role === "user" ? "#fff" : C.body,
+                  alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "85%", whiteSpace: "pre-wrap", lineHeight: 1.45,
+                  borderRadius: 18,
+                  borderBottomRightRadius: m.role === "user" ? 6 : 18,
+                  borderBottomLeftRadius: m.role === "user" ? 18 : 6,
+                }}>{m.content}</div>
+                {/* v14：呢條 message 似足收工報告格式 — 問要唔要套用返落 task list + WIG */}
+                {looksLikeReport(m.content) && (
+                  syncedMsgs[i] ? (
+                    <p className="text-xs px-1" style={{ color: C.green, alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>✓ 已更新 task list 同 WIG</p>
+                  ) : (
+                    <div className="flex items-center gap-2 px-1 flex-wrap" style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>
+                      <span className="text-xs" style={{ color: C.sub }}>偵測到收工報告 —</span>
+                      <Chip bg={C.blue} fg="#fff" onClick={() => applyReportSync(parseReportSync(m.content), i)}>要唔要更新晒 task list + WIG？</Chip>
+                    </div>
+                  )
+                )}
+              </Fragment>
             ))}
             {aiLoading && <p className="text-xs px-1" style={{ color: C.sub }}>✨ 諗緊…</p>}
             {aiSugs.length > 0 && !aiLoading && (
@@ -1215,6 +1357,14 @@ export default function HermesDashboard() {
               <Send size={16} />
             </button>
           </div>
+        </div>
+      )}
+
+      {/* 🗺️ v14：WIG 封存去路線圖之後嘅 ↩️ 復原 toast */}
+      {archivedToast && (
+        <div style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 14px)`, background: C.body, color: "#fff", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.28)", zIndex: 62, fontFamily: FONT, maxWidth: "min(420px, calc(100vw - 32px))" }}>
+          <span className="text-sm" style={{ flex: 1 }}>✓ 「{archivedToast.wig.label}」已存入 36 目標路線圖</span>
+          <button onClick={undoArchive} className="text-sm font-semibold" style={{ color: C.pink, background: "none", border: "none", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>復原</button>
         </div>
       )}
 
