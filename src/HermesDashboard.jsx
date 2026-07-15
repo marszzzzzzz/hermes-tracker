@@ -1,12 +1,20 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v14.1：修正 v14 兩個 bug —
+//      1) AI 輸入格由 <input>（單行）換做 <textarea>（可自動長高），
+//         貼收工報告呢類多行文字入去唔會再俾瀏覽器剝晒個 \n，
+//         令 parseReportSync 讀到返晒逐行內容（之前得返一坨嘢，match 唔到）。
+//      2) WIG 已經改成「打勾即封存去路線圖」，s.wigs 入面已經冇可能有
+//         done:true 嘅紀錄 —— 舊嘅收工報告 WIG 逐條 sync（✓/○ match）
+//         永遠都唔會觸發，係 dead code，成個攞走；報告淨係顯示現行 WIG
+//         ＋路線圖總數已經夠。
 // v14：🗺️ 36 個目標路線圖 — WIG 打勾完成即刻封存出 WIG board，存入路線圖
 //      （連 6 格上限即時騰返個位），路線圖顯示 X/36 進度＋完成日期，
 //      6 秒內可 ↩️ 復原。舊資料入面已經 done 嘅 WIG 開機自動搬一次。
 //      ✨ AI 助手偵測「收工報告」格式（user 貼入嚟或者 AI 覆述都得）—
-//      一認到就喺條 message 底下彈「套用去 task list + WIG」掣，
-//      一撳就將 ✅/⏭️/📤/🔴 同 WIG ✓/○ 逐條 match 返做狀態更新。
+//      一認到就喺條 message 底下彈「套用去 task list」掣，
+//      一撳就將 ✅/⏭️/📤/🔴 逐條 match 返做任務狀態更新。
 // v13：任務可以設 ⏰ 提醒（日期時間＋一次／每1小時／每3小時／每8小時／每日）；
 //      儀表板新增「🔔 提醒清單」— 齊晒所有提醒 + 每個 PIC 委派任務嘅死線；
 //      到鐘會轉紅＋（app 開住時）彈瀏覽器通知；重複提醒自動排下一輪。
@@ -119,14 +127,16 @@ const stripLeadEmoji = (s, times = 1) => {
   return out;
 };
 const looksLikeReport = text => typeof text === "string" && /收工報告/.test(text) && /WIG/.test(text);
-// 將一份收工報告文字解構做 [{kind:"task"|"wig", ...}]，俾 applyReportSync 逐條 match 返落 state
+// 將一份收工報告文字解構做 [{kind:"task", ...}]，俾 applyReportSync 逐條 match 返落 state
+// v14.1：WIG 一打勾就即刻封存去路線圖（moveWigToRoadmap），s.wigs 入面已經
+//        冇可能有 done:true 嘅紀錄，所以報告都唔會再出 WIG ✓ 行 — WIG sync 呢段拎走。
 function parseReportSync(text) {
   const lines = (text || "").split("\n").map(l => l.trim()).filter(Boolean);
   let section = null;
   const items = [];
   for (const line of lines) {
     if (/──/.test(line) && /今日任務/.test(line)) { section = "tasks"; continue; }
-    if (/──/.test(line) && /WIG/.test(line)) { section = "wigs"; continue; }
+    if (/──/.test(line) && /WIG/.test(line)) { section = null; continue; }
     if (section === "tasks") {
       if (line.startsWith("✅")) {
         const rest = stripLeadEmoji(line.slice(1), 1);
@@ -145,9 +155,6 @@ function parseReportSync(text) {
         const m = rest.match(/^(.*?)(?:（連紅.*?）)?$/);
         items.push({ kind: "task", status: "open", title: (m ? m[1] : rest).trim() });
       }
-    } else if (section === "wigs") {
-      const m = line.match(/^(✓|○)\s*P(\d)（(.+?)期）(.+)$/);
-      if (m) items.push({ kind: "wig", done: m[1] === "✓", pri: +m[2], term: m[3], label: m[4].trim() });
     }
   }
   return items;
@@ -259,8 +266,16 @@ export default function HermesDashboard() {
   const [storageOk, setStorageOk] = useState(null); // v10.1：storage 自我檢測（null=檢緊 true=通 false=斷）
   const [pingStatus, setPingStatus] = useState(null); // v10.2：AI 連線測試 null | "testing" | {ok, msg}
   const aiEndRef = useRef(null);
+  const aiInputRef = useRef(null); // v14.1：textarea 自動長高用
 
   useEffect(() => { if (aiOpen) aiEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [aiMsgs, aiLoading, aiOpen]);
+  // v14.1：input 換成 textarea 之後，隨內容自動長高（上限 120px，之後先滾動）
+  useEffect(() => {
+    const el = aiInputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+  }, [aiInput]);
 
   // v13：提醒鬧鐘 — 每 30 秒檢查一次；app 開住先會彈通知（網頁限制）
   useEffect(() => {
@@ -375,7 +390,9 @@ export default function HermesDashboard() {
     setArchivedToast(null);
   }
 
-  // ✨ v14：將收工報告解構結果套用返落 task list + WIG（✅/⏭️/📤 逐條 match title，WIG ✓ 就封存去路線圖）
+  // ✨ v14.1：將收工報告解構結果套用返落 task list（✅/⏭️/📤 逐條 match title）。
+  //           WIG 一打勾就即刻封存去路線圖，s.wigs 唔會再有 done 嘅紀錄，
+  //           所以呢度攞走咗 v14 果段（永遠都唔會觸發嘅）WIG sync。
   function applyReportSync(items, msgIdx) {
     mutate(s => {
       const tasks = s.tasks.map(k => {
@@ -386,15 +403,7 @@ export default function HermesDashboard() {
         if (hit.status === "delegate") return { ...k, status: "delegate", assignee: hit.assignee || k.assignee, received: hit.received || k.received };
         return k;
       });
-      const doneLabels = items.filter(it => it.kind === "wig" && it.done).map(it => it.label);
-      const stay = [];
-      let roadmap = s.roadmap || [];
-      (s.wigs || []).forEach(w => {
-        const hit = doneLabels.some(l => l === w.label || w.label.includes(l) || l.includes(w.label));
-        if (hit) roadmap = [...roadmap, { id: w.id, label: w.label, term: w.term, pri: w.pri, doneDate: todayStr() }];
-        else stay.push(w);
-      });
-      return { ...s, tasks, wigs: stay, roadmap };
+      return { ...s, tasks };
     });
     setSyncedMsgs(p => ({ ...p, [msgIdx]: true }));
   }
@@ -643,7 +652,7 @@ export default function HermesDashboard() {
           `業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完。`,
           "如果你想建議具體任務，喺回覆最尾加一段 <tasks>[{\"line\":\"store\",\"title\":\"message 2 個潛在寄賣者\"}]</tasks>（JSON array，最多 3 個，line 用上面 id）。冇具體任務建議就唔好加呢段。",
           "優先次序邏輯：連紅任務最緊要處理（拆細或委派）；主攻佔比未達標就建議主攻線任務；逾期未收要追；Skip 爆 cap 係警號。",
-          "如果 Mars 叫你出正式收工報告，必須逐字跟返呢個格式（唔好改動 emoji／分隔線／順序），因為 app 會偵測呢個格式俾佢一撳套用返落 task list：\n『📋 Hermes 收工報告 · <日期>』換行『業務完成率 X%（✅N ⏭️N 📤N）｜主攻佔比 X%（目標 X）』，然後空行、『── 今日任務（N）──』、逐條 ✅/⏭️/📤/🔴，最後空行、『── WIG X/Y ──』逐條 ✓／○ P<pri>（<期>期）<label>。",
+          "如果 Mars 叫你出正式收工報告，必須逐字跟返呢個格式（唔好改動 emoji／分隔線／順序），因為 app 會偵測呢個格式俾佢一撳套用返落 task list：\n『📋 Hermes 收工報告 · <日期>』換行『業務完成率 X%（✅N ⏭️N 📤N）｜主攻佔比 X%（目標 X）』，然後空行、『── 今日任務（N）──』、逐條 ✅/⏭️/📤/🔴，最後空行、『── WIG 現行 X/6 ──』逐條 P<pri>（<期>期）<label>。",
           "以下係 Mars 今日嘅 dashboard 即時狀態：\n\n" + aiContext(),
         ].join("\n\n"),
         messages: hist.slice(-12),
@@ -677,7 +686,7 @@ export default function HermesDashboard() {
     const deleg = s.tasks.filter(k => k.status === "delegate").map(k => `📤 ${em(k)} ${k.title} → ${k.assignee}・死線 ${fmtMD(k.deadline)}${k.received ? "・已收貨 ✓" : "・未收"}`);
     const open = s.tasks.filter(k => k.status === "open").map(k => `🔴 ${em(k)} ${k.title}${k.red > 0 ? `（連紅 ${k.red} 日）` : ""}`);
     const staffLine = cfg.staff.map(st => { const d = s.tasks.filter(k => k.status === "delegate" && k.assignee === st.label); return `${st.label} ${d.filter(k => k.received).length}/${d.length}`; }).join(" · ");
-    const wigLines = s.wigs.map(w => `${w.done ? "✓" : "○"} P${w.pri}（${w.term}期）${w.label}`);
+    const wigLines = s.wigs.map(w => `P${w.pri}（${w.term}期）${w.label}`);
     return [
       `📋 Hermes 收工報告 · ${s.date}`,
       `業務完成率 ${r.bizPct}%（✅${r.done} ⏭️${r.skips} 📤${r.deleg}）｜主攻佔比 ${r.focusShare}%（目標 ${cfg.budget.focusPct}）`,
@@ -1269,7 +1278,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v14</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v14.1</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
@@ -1310,14 +1319,14 @@ export default function HermesDashboard() {
                   borderBottomRightRadius: m.role === "user" ? 6 : 18,
                   borderBottomLeftRadius: m.role === "user" ? 18 : 6,
                 }}>{m.content}</div>
-                {/* v14：呢條 message 似足收工報告格式 — 問要唔要套用返落 task list + WIG */}
+                {/* v14.1：呢條 message 似足收工報告格式 — 問要唔要套用返落 task list */}
                 {looksLikeReport(m.content) && (
                   syncedMsgs[i] ? (
-                    <p className="text-xs px-1" style={{ color: C.green, alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>✓ 已更新 task list 同 WIG</p>
+                    <p className="text-xs px-1" style={{ color: C.green, alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>✓ 已更新 task list</p>
                   ) : (
                     <div className="flex items-center gap-2 px-1 flex-wrap" style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>
                       <span className="text-xs" style={{ color: C.sub }}>偵測到收工報告 —</span>
-                      <Chip bg={C.blue} fg="#fff" onClick={() => applyReportSync(parseReportSync(m.content), i)}>要唔要更新晒 task list + WIG？</Chip>
+                      <Chip bg={C.blue} fg="#fff" onClick={() => applyReportSync(parseReportSync(m.content), i)}>要唔要更新晒 task list？</Chip>
                     </div>
                   )
                 )}
@@ -1348,10 +1357,12 @@ export default function HermesDashboard() {
             </div>
           )}
 
-          <div className="flex gap-1.5 px-3 pb-3">
-            <input value={aiInput} onChange={e => setAiInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") askAI(aiInput); }}
-              placeholder="問 Hermes…" className="flex-1 px-3 py-2 text-sm"
-              style={{ border: "none", borderRadius: 999, background: C.bg, color: C.body, outline: "none", fontSize: 16 }} />
+          <div className="flex gap-1.5 px-3 pb-3 items-end">
+            {/* v14.1：由 <input>（單行）換做 <textarea> — 貼收工報告呢類多行文字入嚟先唔會俾瀏覽器剝晒 \n */}
+            <textarea ref={aiInputRef} value={aiInput} onChange={e => setAiInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); askAI(aiInput); } }}
+              placeholder="問 Hermes…（Enter 送出，Shift+Enter 換行）" rows={1} className="flex-1 px-3 py-2 text-sm"
+              style={{ border: "none", borderRadius: 18, background: C.bg, color: C.body, outline: "none", fontSize: 16, resize: "none", lineHeight: 1.4, maxHeight: 120, overflowY: "auto", fontFamily: "inherit" }} />
             <button onClick={() => askAI(aiInput)} disabled={aiLoading} aria-label="送出"
               className="rounded-full flex items-center justify-center" style={{ width: 40, height: 40, background: aiLoading ? C.sub : C.blue, color: "#fff", border: "none", flexShrink: 0 }}>
               <Send size={16} />
