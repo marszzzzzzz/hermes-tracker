@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v15：☀️ 每朝 10:00 自動推送今日任務清單 —
+//      瀏覽器通知（最多 8 條未關任務）＋app 內 digest 卡片（唔使通知權限都見到）。
+//      網頁限制：tab／PWA 開住先推到；10 點後先開 app 就即刻補推。
+//      digestDate 記低今日推咗未（一日一次，過日自動重置，重設今日唔會重推）。
+//      🔔 提醒清單下面加咗說明＋「開通知」掣（權限未俾先出）。
 // v14.4：🌱 延伸 ×3 會學你手打嘅延伸任務 —
 //        「✍️ 其他」自己打嘅延伸任務會記入 extLog（原任務→你打嘅延伸，
 //        最近 50 條，過日／重設今日都保留），每次撳 🌱 延伸都會餵埋俾 AI
@@ -278,6 +283,8 @@ export default function HermesDashboard() {
   // 🗺️ v14：WIG 封存去路線圖之後嘅 ↩️ 復原 toast
   const [archivedToast, setArchivedToast] = useState(null); // { wig }
   const archivedTimer = useRef(null);
+  // ☀️ v15：朝早 10 點任務清單 digest 嘅 app 內卡片
+  const [digestToast, setDigestToast] = useState(null); // { count, titles }
   // ✨ AI 助手
   const [aiOpen, setAiOpen] = useState(false);
   const [aiMsgs, setAiMsgs] = useState([]);
@@ -325,6 +332,29 @@ export default function HermesDashboard() {
         return n;
       });
     }, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // ☀️ v15：每朝 10 點自動推送今日任務清單 — 瀏覽器通知＋app 內卡片。
+  //         網頁限制：app（tab／PWA）開住先推到；10 點後先開 app 就即刻補推，
+  //         一日一次（digestDate 記低今日推咗未）。
+  useEffect(() => {
+    const check = () => setState(prev => {
+      if (!prev) return prev;
+      if (new Date().getHours() < 10) return prev;
+      if (prev.digestDate === todayStr()) return prev;
+      const open = prev.tasks.filter(k => k.status === "open");
+      const body = open.length
+        ? open.slice(0, 8).map(k => "• " + k.title).join("\n") + (open.length > 8 ? `\n…仲有 ${open.length - 8} 個` : "")
+        : "今日暫時未有任務 — 開個靚 plan ✍️";
+      try { if (typeof Notification !== "undefined" && Notification.permission === "granted") new Notification(`☀️ 今日任務清單（${open.length} 個未關）`, { body }); } catch {}
+      setDigestToast({ count: open.length, titles: open.slice(0, 6).map(k => k.title) });
+      const n = { ...prev, digestDate: todayStr() };
+      persist(n);
+      return n;
+    });
+    check();
+    const t = setInterval(check, 60000);
     return () => clearInterval(t);
   }, []);
 
@@ -1091,6 +1121,13 @@ export default function HermesDashboard() {
                 })}
               </Card>
               {(rem.length > 0 || pic.length > 0) && <p className="text-xs mt-1.5 px-1" style={{ color: C.sub }}>📎 網頁限制：彈通知只喺 app 開住時先響；到鐘會喺呢度＋任務標籤轉紅，重複提醒會自動排下一輪。</p>}
+              {/* ☀️ v15：朝早 10 點任務清單 digest 說明＋開通知掣 */}
+              <div className="flex items-center gap-2 mt-1.5 px-1 flex-wrap">
+                <p className="text-xs" style={{ color: C.sub }}>☀️ 每朝 10:00 自動推送今日任務清單（10 點後開 app 會即刻補推，一日一次）。</p>
+                {typeof Notification !== "undefined" && Notification.permission === "default" && (
+                  <Chip bg={C.blue} fg="#fff" onClick={ensureNotifPerm}>開通知</Chip>
+                )}
+              </div>
             </>
           );
         })()}
@@ -1296,7 +1333,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -1338,7 +1375,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v14.4</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v15</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
@@ -1440,6 +1477,24 @@ export default function HermesDashboard() {
         <div style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 14px)`, background: C.body, color: "#fff", borderRadius: 14, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.28)", zIndex: 62, fontFamily: FONT, maxWidth: "min(420px, calc(100vw - 32px))" }}>
           <span className="text-sm" style={{ flex: 1 }}>✓ 「{archivedToast.wig.label}」已存入 36 目標路線圖</span>
           <button onClick={undoArchive} className="text-sm font-semibold" style={{ color: C.pink, background: "none", border: "none", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>復原</button>
+        </div>
+      )}
+
+      {/* ☀️ v15：朝早 10 點任務清單 digest 卡片 */}
+      {digestToast && (
+        <div style={{ position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 14px)`, background: C.card, color: C.body, borderRadius: 16, padding: "14px 16px", boxShadow: "0 8px 24px rgba(0,0,0,0.28)", zIndex: 63, fontFamily: FONT, width: "min(420px, calc(100vw - 32px))" }}>
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-bold">☀️ 早晨！今日任務清單（{digestToast.count} 個未關）</p>
+            <button onClick={() => setDigestToast(null)} aria-label="關閉" style={{ background: "none", border: "none", color: C.sub, padding: 4, WebkitTapHighlightColor: "transparent" }}><X size={16} /></button>
+          </div>
+          {digestToast.count === 0 ? (
+            <p className="text-xs mt-1.5" style={{ color: C.sub }}>今日暫時未有任務 — 開個靚 plan ✍️</p>
+          ) : (
+            <div className="mt-1.5">
+              {digestToast.titles.map((t, i) => <p key={i} className="text-xs" style={{ color: C.body, lineHeight: 1.7 }}>• {t}</p>)}
+              {digestToast.count > digestToast.titles.length && <p className="text-xs" style={{ color: C.sub }}>…仲有 {digestToast.count - digestToast.titles.length} 個</p>}
+            </div>
+          )}
         </div>
       )}
 
