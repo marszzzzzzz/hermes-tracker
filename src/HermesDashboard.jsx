@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v14.3：收工報告 sync 新增嘅任務而家會放返入啱嘅業務線 —
+//        解構任務行嗰陣保留返狀態 emoji 後面嘅業務線 emoji（🏪🥩💎📚🧠🤖），
+//        用佢對返 cfg.lines 搵 line id（主攻線埋 focus flag），
+//        搵唔到先至落「個人」。AI 收工報告格式指引都補返呢個要求。
 // v14.2：修正 v14.1 之後發現嘅兩個問題 —
 //      1) 之前套用收工報告 sync 唔理有冇實際 match 到都照樣顯示「✓ 已更新」，
 //         用戶冇辦法分辨其實乜都冇做到 — 而家老實顯示 matched/created/total 數。
@@ -134,6 +138,13 @@ const stripLeadEmoji = (s, times = 1) => {
   return out;
 };
 const looksLikeReport = text => typeof text === "string" && /收工報告/.test(text) && /WIG/.test(text);
+// ✂️ v14.3：抽走行頭嘅業務線 emoji 但保留返佢 — applyReportSync 靠佢
+//           將新任務放返入啱嘅業務線 section（唔再一律掉入「個人」）
+const takeLeadEmoji = s => {
+  const t = (s || "").trim();
+  const m = t.match(/^\p{Extended_Pictographic}️?\s*/u);
+  return m ? { em: m[0].trim(), rest: t.slice(m[0].length).trim() } : { em: null, rest: t };
+};
 // 將一份收工報告文字解構做 [{kind:"task", ...}]，俾 applyReportSync 逐條 match 返落 state
 // v14.1：WIG 一打勾就即刻封存去路線圖（moveWigToRoadmap），s.wigs 入面已經
 //        冇可能有 done:true 嘅紀錄，所以報告都唔會再出 WIG ✓ 行 — WIG sync 呢段拎走。
@@ -146,21 +157,21 @@ function parseReportSync(text) {
     if (/──/.test(line) && /WIG/.test(line)) { section = null; continue; }
     if (section === "tasks") {
       if (line.startsWith("✅")) {
-        const rest = stripLeadEmoji(line.slice(1), 1);
+        const { em, rest } = takeLeadEmoji(line.slice(1));
         const m = rest.match(/^(.*?)(?:（([⭐]+)）)?$/);
-        items.push({ kind: "task", status: "done", title: (m ? m[1] : rest).trim(), score: m && m[2] ? m[2].length : null });
+        items.push({ kind: "task", status: "done", em, title: (m ? m[1] : rest).trim(), score: m && m[2] ? m[2].length : null });
       } else if (line.startsWith("⏭")) {
-        const rest = stripLeadEmoji(line.replace(/^⏭️?/, ""), 1);
+        const { em, rest } = takeLeadEmoji(line.replace(/^⏭️?/, ""));
         const m = rest.match(/^(.*?)（(.+?)）$/);
-        items.push({ kind: "task", status: "skip", title: (m ? m[1] : rest).trim(), reason: m ? m[2] : null });
+        items.push({ kind: "task", status: "skip", em, title: (m ? m[1] : rest).trim(), reason: m ? m[2] : null });
       } else if (line.startsWith("📤")) {
-        const rest = stripLeadEmoji(line.slice(2), 1);
+        const { em, rest } = takeLeadEmoji(line.slice(2));
         const m = rest.match(/^(.*?)\s*→\s*(\S+)・死線\s*([\d/]+)(・已收貨\s*✓)?/);
-        if (m) items.push({ kind: "task", status: "delegate", title: m[1].trim(), assignee: m[2], received: !!m[4] });
+        if (m) items.push({ kind: "task", status: "delegate", em, title: m[1].trim(), assignee: m[2], received: !!m[4] });
       } else if (line.startsWith("🔴")) {
-        const rest = stripLeadEmoji(line.slice(2), 1);
+        const { em, rest } = takeLeadEmoji(line.slice(2));
         const m = rest.match(/^(.*?)(?:（連紅.*?）)?$/);
-        items.push({ kind: "task", status: "open", title: (m ? m[1] : rest).trim() });
+        items.push({ kind: "task", status: "open", em, title: (m ? m[1] : rest).trim() });
       }
     }
   }
@@ -421,9 +432,14 @@ export default function HermesDashboard() {
         if (hit.status === "delegate") return { ...k, status: "delegate", assignee: hit.assignee || k.assignee, received: hit.received || k.received };
         return k;
       });
-      const added = taskItems.filter(it => !matchedSet.has(it)).map(it => mk("personal", it.title, false, {
-        status: it.status, score: it.score ?? null, reason: it.reason ?? null, assignee: it.assignee ?? null, received: !!it.received,
-      }));
+      // v14.3：用報告行頭嘅業務線 emoji（🏪🥩💎📚🧠🤖）搵返啱嘅 line，
+      //        搵唔到先至落「個人」— 新任務就會出現喺正確嘅業務 section 度
+      const added = taskItems.filter(it => !matchedSet.has(it)).map(it => {
+        const lineMeta = (it.em && cfg.lines.find(l => l.emoji === it.em)) || { id: "personal", tier: "personal" };
+        return mk(lineMeta.id, it.title, lineMeta.tier === "focus", {
+          status: it.status, score: it.score ?? null, reason: it.reason ?? null, assignee: it.assignee ?? null, received: !!it.received,
+        });
+      });
       stats = { matched: matchedSet.size, created: added.length, total: taskItems.length };
       return { ...s, tasks: [...tasks, ...added] };
     });
@@ -674,7 +690,7 @@ export default function HermesDashboard() {
           `業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完。`,
           "如果你想建議具體任務，喺回覆最尾加一段 <tasks>[{\"line\":\"store\",\"title\":\"message 2 個潛在寄賣者\"}]</tasks>（JSON array，最多 3 個，line 用上面 id）。冇具體任務建議就唔好加呢段。",
           "優先次序邏輯：連紅任務最緊要處理（拆細或委派）；主攻佔比未達標就建議主攻線任務；逾期未收要追；Skip 爆 cap 係警號。",
-          "如果 Mars 叫你出正式收工報告，必須逐字跟返呢個格式（唔好改動 emoji／分隔線／順序），因為 app 會偵測呢個格式俾佢一撳套用返落 task list：\n『📋 Hermes 收工報告 · <日期>』換行『業務完成率 X%（✅N ⏭️N 📤N）｜主攻佔比 X%（目標 X）』，然後空行、『── 今日任務（N）──』、逐條 ✅/⏭️/📤/🔴，最後空行、『── WIG 現行 X/6 ──』逐條 P<pri>（<期>期）<label>。",
+          "如果 Mars 叫你出正式收工報告，必須逐字跟返呢個格式（唔好改動 emoji／分隔線／順序），因為 app 會偵測呢個格式俾佢一撳套用返落 task list：\n『📋 Hermes 收工報告 · <日期>』換行『業務完成率 X%（✅N ⏭️N 📤N）｜主攻佔比 X%（目標 X）』，然後空行、『── 今日任務（N）──』、逐條 ✅/⏭️/📤/🔴，每條任務行個狀態 emoji 後面必須跟埋業務線 emoji（🏪🥩💎📚🧠🤖，個人就🧍）再到任務名，app 靠佢將任務放返入啱嘅業務線；最後空行、『── WIG 現行 X/6 ──』逐條 P<pri>（<期>期）<label>。",
           "以下係 Mars 今日嘅 dashboard 即時狀態：\n\n" + aiContext(),
         ].join("\n\n"),
         messages: hist.slice(-12),
@@ -1300,7 +1316,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v14.2</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v14.3</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
