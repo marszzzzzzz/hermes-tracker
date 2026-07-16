@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v14.4：🌱 延伸 ×3 會學你手打嘅延伸任務 —
+//        「✍️ 其他」自己打嘅延伸任務會記入 extLog（原任務→你打嘅延伸，
+//        最近 50 條，過日／重設今日都保留），每次撳 🌱 延伸都會餵埋俾 AI
+//        （同線例子行先），叫佢向你親手寫嘅方向同風格睇齊，一路用一路準。
 // v14.3：收工報告 sync 新增嘅任務而家會放返入啱嘅業務線 —
 //        解構任務行嗰陣保留返狀態 emoji 後面嘅業務線 emoji（🏪🥩💎📚🧠🤖），
 //        用佢對返 cfg.lines 搵 line id（主攻線埋 focus flag），
@@ -178,7 +182,7 @@ function parseReportSync(text) {
   return items;
 }
 
-const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [] });
+const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [] });
 
 function rates(s, cfg) {
   const biz = s.tasks.filter(k => k.line !== "personal" && k.status !== "delegate");
@@ -604,13 +608,31 @@ export default function HermesDashboard() {
     return `\n\n用戶對你過往建議嘅評分：平均 ${avg}/5（共 ${rs.length} 次）。${hi.length ? `高分例子（多啲呢類）：${hi.join("、")}。` : ""}${lo.length ? `低分例子（避開呢類）：${lo.join("、")}。` : ""}`;
   }
 
+  // ✍️ v14.4：用戶自己手打嘅延伸任務 — 除咗加落 task list，
+  //           仲記入 extLog（最近 50 條），fetchExtensions 每次餵返俾 AI，
+  //           等佢一路學你手打延伸嘅風格一路優化建議
+  function addCustomExtension(k) {
+    const t = extCustom.trim();
+    if (!t) return;
+    mutate(s => ({ ...s, tasks: [...s.tasks, mk(k.line, t, k.focus, { ext: true })], extLog: [...(s.extLog || []), { title: t, line: k.line, src: k.title, date: todayStr() }].slice(-50) }));
+    setExtCustom("");
+  }
+  function extLogContext(k) {
+    const log = state.extLog || [];
+    if (!log.length) return "";
+    const same = log.filter(e => e.line === k.line).slice(-5);
+    const other = log.filter(e => e.line !== k.line).slice(-3);
+    const fmt = e => `「${e.src}」→「${e.title}」`;
+    return `\n\n用戶過往自己手打嘅延伸任務（格式：原任務→佢打嘅延伸）— 呢啲係佢親手寫，最能代表佢想要嘅方向同風格，建議要向呢啲睇齊${same.length ? `。同線（${k.line}）例子：${same.map(fmt).join("、")}` : ""}${other.length ? `。其他線例子：${other.map(fmt).join("、")}` : ""}。`;
+  }
+
   // 🌱 延伸 ×2 — 直接問 Claude（v9：唔再靠 /api/extend 後端）
   async function fetchExtensions(k) {
     setExtFor(k.id); setExtLoading(true); setExtSugs([]); setExtErr("");
     try {
       const raw = await callAI({
         maxTokens: 1000,
-        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]${ratingContext()}`,
+        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]${ratingContext()}${extLogContext(k)}`,
         messages: [{ role: "user", content: `完成咗：「${k.title}」（業務線：${k.line}）。建議 3 個延伸任務。` }],
       });
       const arr = pickJSON(raw);
@@ -936,9 +958,9 @@ export default function HermesDashboard() {
               <div className="flex items-center gap-2 px-2.5 py-1.5" style={{ background: C.bg, borderRadius: 12 }}>
                 <span className="text-xs" style={{ color: C.sub }}>✍️</span>
                 <input value={extCustom} onChange={e => setExtCustom(e.target.value)} placeholder="其他 — 自己打延伸任務…"
-                  onKeyDown={e => { if (e.key === "Enter" && extCustom.trim()) { mutate(s => ({ ...s, tasks: [...s.tasks, mk(k.line, extCustom.trim(), k.focus, { ext: true })] })); setExtCustom(""); } }}
+                  onKeyDown={e => { if (e.key === "Enter") addCustomExtension(k); }}
                   className="flex-1 min-w-0 text-sm py-1" style={{ border: "none", background: "transparent", outline: "none", color: C.body, fontSize: 16 }} />
-                <Chip bg={C.blue} fg="#fff" onClick={() => { if (!extCustom.trim()) return; mutate(s => ({ ...s, tasks: [...s.tasks, mk(k.line, extCustom.trim(), k.focus, { ext: true })] })); setExtCustom(""); }}>＋加入</Chip>
+                <Chip bg={C.blue} fg="#fff" onClick={() => addCustomExtension(k)}>＋加入</Chip>
               </div>
             )}
           </div>
@@ -1274,7 +1296,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -1316,7 +1338,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v14.3</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v14.4</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
