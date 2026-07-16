@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v14.2：修正 v14.1 之後發現嘅兩個問題 —
+//      1) 之前套用收工報告 sync 唔理有冇實際 match 到都照樣顯示「✓ 已更新」，
+//         用戶冇辦法分辨其實乜都冇做到 — 而家老實顯示 matched/created/total 數。
+//      2) sync 之前淨係識更新「已經喺 task list 度」嘅任務 —— 如果係淨係口頭
+//         同 AI 講、未撳過＋加落 task list 嘅任務，match 唔到就即刻捨棄，
+//         乜都唔會發生。而家 match 唔到嘅任務會照抄報告入面嘅狀態自動加做
+//         新任務，唔使自己手動先加一次先再 sync。
 // v14.1：修正 v14 兩個 bug —
 //      1) AI 輸入格由 <input>（單行）換做 <textarea>（可自動長高），
 //         貼收工報告呢類多行文字入去唔會再俾瀏覽器剝晒個 \n，
@@ -393,19 +400,34 @@ export default function HermesDashboard() {
   // ✨ v14.1：將收工報告解構結果套用返落 task list（✅/⏭️/📤 逐條 match title）。
   //           WIG 一打勾就即刻封存去路線圖，s.wigs 唔會再有 done 嘅紀錄，
   //           所以呢度攞走咗 v14 果段（永遠都唔會觸發嘅）WIG sync。
+  // v14.2：修正兩個問題 —
+  //        1) 之前唔理有冇 match 到都照樣顯示「✓ 已更新」，用戶冇辦法知道其實乜都冇做到；
+  //           而家改成記低實際 matched/created/total 數，喺 UI 誠實顯示返。
+  //        2) 之前淨係識更新「已經喺 task list 入面」嘅任務 —— 如果係同 AI
+  //           口講、未撳過＋加落 task list 嘅任務，match 唔到就即刻捨棄，
+  //           乜都唔會發生。而家 match 唔到嘅任務會照抄 AI 報告入面嘅狀態
+  //           自動加做新任務，唔使自己手動先加一次先再 sync。
   function applyReportSync(items, msgIdx) {
+    let stats = { matched: 0, created: 0, total: 0 };
     mutate(s => {
+      const taskItems = items.filter(it => it.kind === "task" && it.title);
+      const matchedSet = new Set();
       const tasks = s.tasks.map(k => {
-        const hit = items.find(it => it.kind === "task" && it.title && (it.title === k.title || k.title.includes(it.title) || it.title.includes(k.title)));
+        const hit = taskItems.find(it => !matchedSet.has(it) && (it.title === k.title || k.title.includes(it.title) || it.title.includes(k.title)));
         if (!hit) return k;
+        matchedSet.add(hit);
         if (hit.status === "done") return { ...k, status: "done", score: hit.score || k.score };
         if (hit.status === "skip") return { ...k, status: "skip", reason: hit.reason || k.reason };
         if (hit.status === "delegate") return { ...k, status: "delegate", assignee: hit.assignee || k.assignee, received: hit.received || k.received };
         return k;
       });
-      return { ...s, tasks };
+      const added = taskItems.filter(it => !matchedSet.has(it)).map(it => mk("personal", it.title, false, {
+        status: it.status, score: it.score ?? null, reason: it.reason ?? null, assignee: it.assignee ?? null, received: !!it.received,
+      }));
+      stats = { matched: matchedSet.size, created: added.length, total: taskItems.length };
+      return { ...s, tasks: [...tasks, ...added] };
     });
-    setSyncedMsgs(p => ({ ...p, [msgIdx]: true }));
+    setSyncedMsgs(p => ({ ...p, [msgIdx]: stats }));
   }
 
   function delegate(k, staff, iso) {
@@ -1278,7 +1300,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v14.1</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v14.2</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
@@ -1322,7 +1344,11 @@ export default function HermesDashboard() {
                 {/* v14.1：呢條 message 似足收工報告格式 — 問要唔要套用返落 task list */}
                 {looksLikeReport(m.content) && (
                   syncedMsgs[i] ? (
-                    <p className="text-xs px-1" style={{ color: C.green, alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>✓ 已更新 task list</p>
+                    <p className="text-xs px-1" style={{ color: syncedMsgs[i].total === 0 ? C.orange : C.green, alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>
+                      {syncedMsgs[i].total === 0
+                        ? "⚠️ 冇讀到任何任務行 — 格式可能同範本對唔上（睇下 emoji／分隔線／「── 今日任務 ──」有冇跟足）"
+                        : `✓ 已更新 ${syncedMsgs[i].matched} 個現有任務${syncedMsgs[i].created ? `，新增 ${syncedMsgs[i].created} 個` : ""}`}
+                    </p>
                   ) : (
                     <div className="flex items-center gap-2 px-1 flex-wrap" style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start" }}>
                       <span className="text-xs" style={{ color: C.sub }}>偵測到收工報告 —</span>
