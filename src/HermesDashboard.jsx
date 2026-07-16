@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
 
+// v16：🎪 今日主場（多業務老闆日日要答嘅問題：今日主力做邊瓣？）—
+//      今日 tab 揀 1–2 條業務線做主場：section 排上最前＋header 標 🎪，
+//      AI（對話／🌱延伸／WIG 建議）全部圍住主場轉。
+//      冷落建議：邊條業務線連續 3 日冇完成過任務（lastDone 記錄，mark done
+//      同收工報告 sync 都會更新），app 就建議佢做今日主場 —「就係佢」一撳即set。
+//      ☀️ 10am digest 都會提埋（未揀主場先出）。主場係當日限定，過日自動清。
 // v15：☀️ 每朝 10:00 自動推送今日任務清單 —
 //      瀏覽器通知（最多 8 條未關任務）＋app 內 digest 卡片（唔使通知權限都見到）。
 //      網頁限制：tab／PWA 開住先推到；10 點後先開 app 就即刻補推。
@@ -136,6 +142,8 @@ const priColor = p => (p === 0 ? C.red : p === 1 ? C.orange : C.blue);
 
 // 🗺️ v14：36 個目標路線圖 — 固定目標數，唔開俾用戶自訂
 const ROADMAP_GOAL = 36;
+// 🎪 v16：業務線連續幾多日冇完成任務就建議做今日主場
+const NEGLECT_DAYS = 3;
 
 // ✂️ v14：解構收工報告文字用嘅 emoji 前綴
 const stripLeadEmoji = (s, times = 1) => {
@@ -187,7 +195,7 @@ function parseReportSync(text) {
   return items;
 }
 
-const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [] });
+const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [], theme: null, lastDone: {} });
 
 function rates(s, cfg) {
   const biz = s.tasks.filter(k => k.line !== "personal" && k.status !== "delegate");
@@ -284,7 +292,8 @@ export default function HermesDashboard() {
   const [archivedToast, setArchivedToast] = useState(null); // { wig }
   const archivedTimer = useRef(null);
   // ☀️ v15：朝早 10 點任務清單 digest 嘅 app 內卡片
-  const [digestToast, setDigestToast] = useState(null); // { count, titles }
+  const [digestToast, setDigestToast] = useState(null); // { count, titles, themeLine }
+  const cfgRef = useRef(null); // v16：digest effect（空 deps）攞唔到最新 cfg — 用 ref 橋接
   // ✨ AI 助手
   const [aiOpen, setAiOpen] = useState(false);
   const [aiMsgs, setAiMsgs] = useState([]);
@@ -298,6 +307,7 @@ export default function HermesDashboard() {
   const aiInputRef = useRef(null); // v14.1：textarea 自動長高用
 
   useEffect(() => { if (aiOpen) aiEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [aiMsgs, aiLoading, aiOpen]);
+  useEffect(() => { cfgRef.current = cfg; }, [cfg]); // v16
   // v14.1：input 換成 textarea 之後，隨內容自動長高（上限 120px，之後先滾動）
   useEffect(() => {
     const el = aiInputRef.current;
@@ -344,11 +354,25 @@ export default function HermesDashboard() {
       if (new Date().getHours() < 10) return prev;
       if (prev.digestDate === todayStr()) return prev;
       const open = prev.tasks.filter(k => k.status === "open");
-      const body = open.length
+      // 🎪 v16：digest 順便建議今日主場 — 有業務線 NEGLECT_DAYS 日冇完成任務、
+      //         而今日又未揀主場，就喺通知＋卡片提一提（cfgRef：effect 開機時 cfg 仲係 null）
+      let themeLine = "";
+      const themeOn = prev.theme && prev.theme.date === todayStr() && prev.theme.lines.length;
+      if (!themeOn && cfgRef.current) {
+        let best = null;
+        cfgRef.current.lines.filter(l => l.tier === "biz").forEach(l => {
+          const d = (prev.lastDone || {})[l.id];
+          if (!d) return;
+          const n = Math.round((new Date(todayStr()) - new Date(d)) / 86400000);
+          if (n >= NEGLECT_DAYS && (!best || n > best.n)) best = { l, n };
+        });
+        if (best) themeLine = `\n🎪 建議今日主場：${best.l.emoji} ${best.l.label}（${best.n} 日未郁）`;
+      }
+      const body = (open.length
         ? open.slice(0, 8).map(k => "• " + k.title).join("\n") + (open.length > 8 ? `\n…仲有 ${open.length - 8} 個` : "")
-        : "今日暫時未有任務 — 開個靚 plan ✍️";
+        : "今日暫時未有任務 — 開個靚 plan ✍️") + themeLine;
       try { if (typeof Notification !== "undefined" && Notification.permission === "granted") new Notification(`☀️ 今日任務清單（${open.length} 個未關）`, { body }); } catch {}
-      setDigestToast({ count: open.length, titles: open.slice(0, 6).map(k => k.title) });
+      setDigestToast({ count: open.length, titles: open.slice(0, 6).map(k => k.title), themeLine: themeLine.trim() || null });
       const n = { ...prev, digestDate: todayStr() };
       persist(n);
       return n;
@@ -425,7 +449,16 @@ export default function HermesDashboard() {
     return () => document.removeEventListener("visibilitychange", onHide);
   }, []);
   function mutate(fn) { setState(prev => { const n = fn(prev); persist(n); return n; }); }
-  const setTask = (id, patch) => mutate(s => ({ ...s, tasks: s.tasks.map(k => (k.id === id ? { ...k, ...patch } : k)) }));
+  // v16：mark done 嗰陣順手記低 lastDone[line]=今日 — 🎪 今日主場建議靠佢計「幾多日未郁」
+  const setTask = (id, patch) => mutate(s => {
+    const tasks = s.tasks.map(k => (k.id === id ? { ...k, ...patch } : k));
+    let lastDone = s.lastDone || {};
+    if (patch.status === "done") {
+      const t = s.tasks.find(k => k.id === id);
+      if (t) lastDone = { ...lastDone, [t.line]: todayStr() };
+    }
+    return { ...s, tasks, lastDone };
+  });
 
   // 🗺️ v14：WIG 打完勾即刻封存出 board，存入 36 目標路線圖（連 6 格上限即時騰位）
   function moveWigToRoadmap(w) {
@@ -457,11 +490,12 @@ export default function HermesDashboard() {
     mutate(s => {
       const taskItems = items.filter(it => it.kind === "task" && it.title);
       const matchedSet = new Set();
+      const doneLines = new Set(); // v16：sync 完成嘅 line 記入 lastDone
       const tasks = s.tasks.map(k => {
         const hit = taskItems.find(it => !matchedSet.has(it) && (it.title === k.title || k.title.includes(it.title) || it.title.includes(k.title)));
         if (!hit) return k;
         matchedSet.add(hit);
-        if (hit.status === "done") return { ...k, status: "done", score: hit.score || k.score };
+        if (hit.status === "done") { doneLines.add(k.line); return { ...k, status: "done", score: hit.score || k.score }; }
         if (hit.status === "skip") return { ...k, status: "skip", reason: hit.reason || k.reason };
         if (hit.status === "delegate") return { ...k, status: "delegate", assignee: hit.assignee || k.assignee, received: hit.received || k.received };
         return k;
@@ -470,15 +504,47 @@ export default function HermesDashboard() {
       //        搵唔到先至落「個人」— 新任務就會出現喺正確嘅業務 section 度
       const added = taskItems.filter(it => !matchedSet.has(it)).map(it => {
         const lineMeta = (it.em && cfg.lines.find(l => l.emoji === it.em)) || { id: "personal", tier: "personal" };
+        if (it.status === "done") doneLines.add(lineMeta.id);
         return mk(lineMeta.id, it.title, lineMeta.tier === "focus", {
           status: it.status, score: it.score ?? null, reason: it.reason ?? null, assignee: it.assignee ?? null, received: !!it.received,
         });
       });
       stats = { matched: matchedSet.size, created: added.length, total: taskItems.length };
-      return { ...s, tasks: [...tasks, ...added] };
+      const lastDone = { ...(s.lastDone || {}) };
+      doneLines.forEach(l => { lastDone[l] = todayStr(); });
+      return { ...s, tasks: [...tasks, ...added], lastDone };
     });
     setSyncedMsgs(p => ({ ...p, [msgIdx]: stats }));
   }
+
+  // ═══ 🎪 v16：今日主場 — 每日揀 1–2 條業務線做今日主力 ═══
+  // theme 淨係當日有效（date !== 今日就當冇揀）；建議邏輯：連續 NEGLECT_DAYS 日
+  // 冇完成過任務嘅業務線，建議做今日主場（冇 lastDone 紀錄嘅唔當冷落，免得一開始紅晒）
+  const themeLines = state?.theme && state.theme.date === todayStr() ? state.theme.lines : [];
+  function toggleThemeLine(id) {
+    mutate(s => {
+      const cur = s.theme && s.theme.date === todayStr() ? [...s.theme.lines] : [];
+      const i = cur.indexOf(id);
+      if (i >= 0) cur.splice(i, 1); else { cur.push(id); while (cur.length > 2) cur.shift(); }
+      return { ...s, theme: cur.length ? { lines: cur, date: todayStr() } : null };
+    });
+  }
+  function neglectDaysOf(id) {
+    const d = (state.lastDone || {})[id];
+    if (!d) return null;
+    return Math.round((new Date(todayStr()) - new Date(d)) / 86400000);
+  }
+  function themeSuggestion() {
+    let best = null;
+    cfg.lines.filter(l => l.tier === "biz" && !themeLines.includes(l.id)).forEach(l => {
+      const n = neglectDaysOf(l.id);
+      if (n !== null && n >= NEGLECT_DAYS && (!best || n > best.n)) best = { line: l, n };
+    });
+    return best;
+  }
+  const themeDescStr = () => themeLines.length
+    ? themeLines.map(id => { const l = cfg.lines.find(x => x.id === id); return l ? `${l.emoji} ${l.label}` : id; }).join("＋")
+    : "";
 
   function delegate(k, staff, iso) {
     const dl = snapToWindow(iso, staff.window);
@@ -662,7 +728,7 @@ export default function HermesDashboard() {
     try {
       const raw = await callAI({
         maxTokens: 1000,
-        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]${ratingContext()}${extLogContext(k)}`,
+        system: `你係任務延伸助手。用戶完成咗一個任務，你建議 3 個自然嘅下一步延伸任務。業務線：${lineDescStr()}。${themeLines.length ? `🎪 今日主場係 ${themeDescStr()} — 3 個建議入面至少 1 個要出主場線。` : ""}任務名格式：動詞＋數字＋名詞，≤10 分鐘做完，用廣東話。淨係回覆 JSON array，唔好有任何其他文字：[{"line":"<line id>","title":"..."},{"line":"...","title":"..."},{"line":"...","title":"..."}]${ratingContext()}${extLogContext(k)}`,
         messages: [{ role: "user", content: `完成咗：「${k.title}」（業務線：${k.line}）。建議 3 個延伸任務。` }],
       });
       const arr = pickJSON(raw);
@@ -679,7 +745,7 @@ export default function HermesDashboard() {
       const rr = rates(state, cfg);
       const raw = await callAI({
         maxTokens: 800,
-        system: `你係 WIG（Wildly Important Goal）教練。根據用戶而家嘅 WIG 進度同業務狀態，建議 3 個新嘅短期 WIG。格式：「從 X 到 Y」或者明確可量度目標，用廣東話，每個 ≤20 字。業務線：${lineDescStr()}。淨係回覆 JSON array，唔好有任何其他文字：[{"label":"..."},{"label":"..."},{"label":"..."}]${ratingContext()}`,
+        system: `你係 WIG（Wildly Important Goal）教練。根據用戶而家嘅 WIG 進度同業務狀態，建議 3 個新嘅短期 WIG。格式：「從 X 到 Y」或者明確可量度目標，用廣東話，每個 ≤20 字。業務線：${lineDescStr()}。${themeLines.length ? `🎪 今日主場係 ${themeDescStr()} — 建議優先圍繞主場線。` : ""}淨係回覆 JSON array，唔好有任何其他文字：[{"label":"..."},{"label":"..."},{"label":"..."}]${ratingContext()}`,
         messages: [{ role: "user", content: `而家 WIG：${state.wigs.map(w => `${w.done ? "✓" : "○"}P${w.pri} ${w.label}`).join("；") || "（空）"}。今日業務完成率 ${rr.bizPct}%，主攻佔比 ${rr.focusShare}%。建議 3 個新 WIG。` }],
       });
       const arr = pickJSON(raw).filter(x => x && x.label).slice(0, 3);
@@ -719,6 +785,7 @@ export default function HermesDashboard() {
     };
     return [
       `日期：${state.date}｜衝刺 #${cfg.sprint.num}（${cfg.sprint.start} 至 ${cfg.sprint.end}）`,
+      `🎪 今日主場：${themeDescStr() || "（未揀）"}${(() => { const g = themeSuggestion(); return g ? `｜建議主場：${g.line.emoji}${g.line.label}（${g.n} 日未有完成任務）` : ""; })()}`,
       `業務完成率 ${r.bizPct}%（目標 85）｜已關 ${r.closed}/${r.denom}｜主攻佔比 ${r.focusShare}%（目標 ${cfg.budget.focusPct}）｜Skip ${r.skips}/${cfg.skipCap}｜影響分 ${r.impact}｜個人 ${r.perPct}%｜跟收 ${r.fuDone}/${r.fuAll}｜逾期未收 ${r.overdue}`,
       `WIG（現行 ${state.wigs.length}/6）：${state.wigs.map(w => `P${w.pri}${w.term} ${w.label}`).join("；") || "（未有 WIG，仲有位加）"}`,
       `🗺️ 36 個目標路線圖：${(state.roadmap || []).length}/${ROADMAP_GOAL}`,
@@ -741,7 +808,7 @@ export default function HermesDashboard() {
           "規則：回覆要短（3–6 句內），先講結論。你唔可以自己加任務 — Mars 係 approval gate，你只可以建議。",
           `業務線：${lineDescStr()}。任務名格式：動詞＋數字＋名詞，≤10 分鐘做完。`,
           "如果你想建議具體任務，喺回覆最尾加一段 <tasks>[{\"line\":\"store\",\"title\":\"message 2 個潛在寄賣者\"}]</tasks>（JSON array，最多 3 個，line 用上面 id）。冇具體任務建議就唔好加呢段。",
-          "優先次序邏輯：連紅任務最緊要處理（拆細或委派）；主攻佔比未達標就建議主攻線任務；逾期未收要追；Skip 爆 cap 係警號。",
+          "優先次序邏輯：連紅任務最緊要處理（拆細或委派）；主攻佔比未達標就建議主攻線任務；逾期未收要追；Skip 爆 cap 係警號。如果有 🎪 今日主場，建議任務優先出主場嗰（幾）條線；如果 dashboard 顯示有建議主場（有業務線幾日冇完成任務），提一提 Mars 好唔好今日主力做返嗰邊。",
           "如果 Mars 叫你出正式收工報告，必須逐字跟返呢個格式（唔好改動 emoji／分隔線／順序），因為 app 會偵測呢個格式俾佢一撳套用返落 task list：\n『📋 Hermes 收工報告 · <日期>』換行『業務完成率 X%（✅N ⏭️N 📤N）｜主攻佔比 X%（目標 X）』，然後空行、『── 今日任務（N）──』、逐條 ✅/⏭️/📤/🔴，每條任務行個狀態 emoji 後面必須跟埋業務線 emoji（🏪🥩💎📚🧠🤖，個人就🧍）再到任務名，app 靠佢將任務放返入啱嘅業務線；最後空行、『── WIG 現行 X/6 ──』逐條 P<pri>（<期>期）<label>。",
           "以下係 Mars 今日嘅 dashboard 即時狀態：\n\n" + aiContext(),
         ].join("\n\n"),
@@ -1003,13 +1070,14 @@ export default function HermesDashboard() {
     const meta = isPersonal ? { id: "personal", label: "個人", emoji: "🧍", tier: "personal" } : cfg.lines.find(l => l.id === lineId);
     const list = state.tasks.filter(k => k.line === meta.id);
     const isFocus = meta.tier === "focus";
+    const isTheme = themeLines.includes(meta.id); // 🎪 v16
     let pool = isPersonal ? cfg.suggestions.personal : meta.gated ? (state.diamondInquiry ? cfg.suggestions.diamond_sales : cfg.suggestions.diamond_brand) : cfg.suggestions[meta.id] || [];
     pool = (pool || []).filter(t => !list.some(k => k.title === t));
     return (
       <section className="mt-5">
         <div className="flex items-center justify-between px-1">
-          <SectionHeader color={isFocus ? C.pink : C.sub}>
-            {meta.emoji} {meta.label}{isFocus ? ` · 主攻 ${cfg.budget.focusPct}%` : isPersonal ? " · 另計" : ""}
+          <SectionHeader color={isTheme || isFocus ? C.pink : C.sub}>
+            {isTheme ? "🎪 " : ""}{meta.emoji} {meta.label}{isTheme ? " · 今日主場" : isFocus ? ` · 主攻 ${cfg.budget.focusPct}%` : isPersonal ? " · 另計" : ""}
           </SectionHeader>
           <div className="flex gap-1.5 items-center">
             {meta.gated && (
@@ -1333,7 +1401,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate, lastDone: state.lastDone }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -1359,7 +1427,30 @@ export default function HermesDashboard() {
           <span className="text-xs font-semibold" style={{ color: C.blue }}>儀表板 ›</span>
         </button>
 
-        {cfg.lines.map(l => <div key={l.id}>{Section({ lineId: l.id })}</div>)}
+        {/* 🎪 v16：今日主場 picker — 揀 1–2 條業務線做今日主力，section 會排上最前 */}
+        {(() => {
+          const sug = themeSuggestion();
+          return (
+            <div className="mt-4">
+              <div className="px-1"><SectionHeader color={C.pink}>🎪 今日主場{themeLines.length ? ` · ${themeDescStr()}` : ""}</SectionHeader></div>
+              <div className="flex flex-wrap gap-1.5 mt-2 px-1">
+                {cfg.lines.filter(l => l.tier === "biz").map(l => {
+                  const on = themeLines.includes(l.id);
+                  return <Chip key={l.id} bg={on ? C.pink : C.card} fg={on ? "#fff" : C.body} onClick={() => toggleThemeLine(l.id)}>{l.emoji} {l.label}{on ? " ✓" : ""}</Chip>;
+                })}
+              </div>
+              {sug && (
+                <div className="flex items-center gap-2 mt-2 px-1 flex-wrap">
+                  <span className="text-xs" style={{ color: C.orange }}>🎪 建議今日主場：{sug.line.emoji} {sug.line.label}（{sug.n} 日未有完成任務）</span>
+                  <Chip bg={C.orange} fg="#fff" onClick={() => toggleThemeLine(sug.line.id)}>就係佢</Chip>
+                </div>
+              )}
+              {!themeLines.length && !sug && <p className="text-xs mt-1.5 px-1" style={{ color: C.sub }}>揀 1–2 條業務線做今日主力 — 個 section 排上最前，AI 建議都會圍住佢轉。</p>}
+            </div>
+          );
+        })()}
+
+        {[...cfg.lines].sort((a, b) => (themeLines.includes(b.id) ? 1 : 0) - (themeLines.includes(a.id) ? 1 : 0)).map(l => <div key={l.id}>{Section({ lineId: l.id })}</div>)}
         {Section({ isPersonal: true })}
       </>
     );
@@ -1375,7 +1466,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v15</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v16</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
@@ -1495,6 +1586,7 @@ export default function HermesDashboard() {
               {digestToast.count > digestToast.titles.length && <p className="text-xs" style={{ color: C.sub }}>…仲有 {digestToast.count - digestToast.titles.length} 個</p>}
             </div>
           )}
+          {digestToast.themeLine && <p className="text-xs mt-1.5 font-semibold" style={{ color: C.orange }}>{digestToast.themeLine}</p>}
         </div>
       )}
 
