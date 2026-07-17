@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef, Fragment } from "react";
-import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
+import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight, Archive, ArrowUpCircle } from "lucide-react";
 
+// v18：📦 封存 tab ＋ 🗓️ WIG 計劃表 ＋ 任務 filter —
+//      新第四個 tab「封存」：過咗嗰日，已關任務（✅／⏭️／📤已收貨）rollover 時
+//      自動封存入嚟（每日一組，留 60 日），有 🔍 搜尋，唔再留喺 task list。
+//      🗓️ WIG 計劃表：WIG board 得 6 位，未輪到嘅目標喺度排隊 —
+//      手動加或者 🌱 AI 建議（label＋期＋P），撳 P／期即場改，⬆️ 一撳推上 board。
+//      今日 tab 加咗 filter（全部／🔴／✅／⏭️／📤），filter 開咗冇 match 嘅線收起。
 // v17.1：修正月曆 tab 打字打一個字就失焦 — Card／Chip／SectionHeader／StatusBtn
 //        本來定義喺 component 入面，每次 render 都係新 identity，React 成個
 //        subtree remount，input 即刻失焦。而家搬晒上 module 層（v11 同款 bug，
@@ -218,7 +224,7 @@ function parseReportSync(text) {
   return items;
 }
 
-const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [], theme: null, lastDone: {}, routines: [] });
+const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [], theme: null, lastDone: {}, routines: [], archive: [], wigPlan: [] });
 
 function rates(s, cfg) {
   const biz = s.tasks.filter(k => k.line !== "personal" && k.status !== "delegate");
@@ -242,7 +248,13 @@ function rollover(s, cfg) {
   const carried = s.tasks.filter(k => k.status === "open").map(k => ({ ...k, red: k.red + 1 }));
   const delegOpen = s.tasks.filter(k => k.status === "delegate" && !k.received);
   const review = [...new Set([...s.reviewList, ...carried.filter(k => k.red >= 2).map(k => k.title)])];
-  return { ...s, date: todayStr(), tasks: [...carried, ...delegOpen], history: [...s.history, { date: s.date, biz: r.bizPct, per: r.perPct, impact: r.impact }].slice(-14), reviewList: review };
+  // 📦 v18：過咗嗰日，已關嘅任務（✅done／⏭️skip／📤已收貨）唔再消失 —
+  //         封存入 archive（每日一組，留最近 60 日），封存 tab 有得睇返
+  const closed = s.tasks.filter(k => k.status === "done" || k.status === "skip" || (k.status === "delegate" && k.received));
+  const archive = closed.length
+    ? [...(s.archive || []), { date: s.date, tasks: closed.map(k => ({ title: k.title, line: k.line, status: k.status, score: k.score || null, reason: k.reason || null, assignee: k.assignee || null })) }].slice(-60)
+    : (s.archive || []);
+  return { ...s, date: todayStr(), tasks: [...carried, ...delegOpen], history: [...s.history, { date: s.date, biz: r.bizPct, per: r.perPct, impact: r.impact }].slice(-14), reviewList: review, archive };
 }
 
 // ── Activity Rings（Apple Fitness 風格）──
@@ -308,6 +320,13 @@ export default function HermesDashboard() {
   const [calFreq, setCalFreq] = useState("once"); // "once" | "weekly" | "monthly"
   const [calEditId, setCalEditId] = useState(null);
   const [calEditDraft, setCalEditDraft] = useState("");
+  // 📦 v18：任務清單 filter ＋ 封存 tab ＋ WIG 計劃表
+  const [taskFilter, setTaskFilter] = useState("all"); // all | open | done | skip | delegate
+  const [boxSearch, setBoxSearch] = useState("");
+  const [planDraft, setPlanDraft] = useState("");
+  const [planSugs, setPlanSugs] = useState([]);
+  const [planSugLoading, setPlanSugLoading] = useState(false);
+  const [planSugErr, setPlanSugErr] = useState("");
   const [skipFor, setSkipFor] = useState(null);
   const [delegFor, setDelegFor] = useState(null);
   const [adding, setAdding] = useState(null);
@@ -829,6 +848,22 @@ export default function HermesDashboard() {
     setWigSugLoading(false);
   }
 
+  // 🗓️ v18：WIG 計劃表 AI 建議 — 睇住現行 WIG／路線圖／計劃表，建議未來 WIG 候補
+  async function fetchPlanSugs() {
+    setPlanSugLoading(true); setPlanSugs([]); setPlanSugErr("");
+    try {
+      const raw = await callAI({
+        maxTokens: 800,
+        system: `你係 WIG（Wildly Important Goal）長線規劃教練。用戶有個「WIG 計劃表」擺未來想做嘅 WIG 候補（現行 WIG board 得 6 個位，滿咗就排隊）。根據佢嘅業務狀態建議 3 個計劃 WIG。格式：「從 X 到 Y」或者明確可量度目標，用廣東話，每個 ≤20 字。term 揀 短／中／長（短=今個衝刺、中=今季、長=今年）。pri 揀 0／1／2（0 最高）。業務線：${lineDescStr()}。淨係回覆 JSON array，唔好有任何其他文字：[{"label":"...","term":"短","pri":1},...]${ratingContext()}`,
+        messages: [{ role: "user", content: `現行 WIG：${state.wigs.map(w => `P${w.pri}（${w.term}期）${w.label}`).join("；") || "（空）"}。計劃表已有：${(state.wigPlan || []).map(p => p.label).join("；") || "（空）"}。🗺️ 路線圖已完成 ${(state.roadmap || []).length}/${ROADMAP_GOAL}。建議 3 個新嘅計劃 WIG（唔好同上面重複）。` }],
+      });
+      const arr = pickJSON(raw).filter(x => x && x.label).slice(0, 3);
+      setPlanSugs(arr);
+      if (!arr.length) setPlanSugErr("AI 無俾到建議 — 可以手動加");
+    } catch (e) { setPlanSugErr("AI 建議失敗：" + String(e.message || e).slice(0, 90)); }
+    setPlanSugLoading(false);
+  }
+
   // ✂️ 拆細 ×2 — 直接問 Claude（v9：唔再靠 /api/split 後端）
   async function splitTask(k) {
     setSplitFor(k.id); setSplitErr(null);
@@ -863,6 +898,7 @@ export default function HermesDashboard() {
       `業務完成率 ${r.bizPct}%（目標 85）｜已關 ${r.closed}/${r.denom}｜主攻佔比 ${r.focusShare}%（目標 ${cfg.budget.focusPct}）｜Skip ${r.skips}/${cfg.skipCap}｜影響分 ${r.impact}｜個人 ${r.perPct}%｜跟收 ${r.fuDone}/${r.fuAll}｜逾期未收 ${r.overdue}`,
       `WIG（現行 ${state.wigs.length}/6）：${state.wigs.map(w => `P${w.pri}${w.term} ${w.label}`).join("；") || "（未有 WIG，仲有位加）"}`,
       `🗺️ 36 個目標路線圖：${(state.roadmap || []).length}/${ROADMAP_GOAL}`,
+      `🗓️ WIG 計劃表（候補）：${(state.wigPlan || []).map(p => `P${p.pri}（${p.term}期）${p.label}`).join("；") || "（空）"}`,
       `今日任務：${state.tasks.length ? state.tasks.map(fmt).join("\n") : "（未有任務）"}`,
       `近期完成率：${state.history.slice(-7).map(h => `${h.date.slice(5)}=${h.biz}%`).join(", ") || "（無記錄）"}`,
       `週六檢討清單：${state.reviewList.join("；") || "（空）"}`,
@@ -1129,7 +1165,9 @@ export default function HermesDashboard() {
 
   function Section({ lineId, isPersonal }) {
     const meta = isPersonal ? { id: "personal", label: "個人", emoji: "🧍", tier: "personal" } : cfg.lines.find(l => l.id === lineId);
-    const list = state.tasks.filter(k => k.line === meta.id);
+    // 📦 v18：跟 taskFilter 過濾；filter 開咗而條線冇 match 就成個 section 收起
+    const list = state.tasks.filter(k => k.line === meta.id && (taskFilter === "all" || k.status === taskFilter));
+    if (taskFilter !== "all" && list.length === 0) return null;
     const isFocus = meta.tier === "focus";
     const isTheme = themeLines.includes(meta.id); // 🎪 v16
     let pool = isPersonal ? cfg.suggestions.personal : meta.gated ? (state.diamondInquiry ? cfg.suggestions.diamond_sales : cfg.suggestions.diamond_brand) : cfg.suggestions[meta.id] || [];
@@ -1462,7 +1500,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate, lastDone: state.lastDone, routines: state.routines }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate, lastDone: state.lastDone, routines: state.routines, archive: state.archive, wigPlan: state.wigPlan }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -1487,6 +1525,13 @@ export default function HermesDashboard() {
           <span className="flex-1 text-xs" style={{ color: C.sub }}>業務完成率 · 目標 85<br />已關 {r.closed}/{r.denom} ・ 主攻 {r.focusShare}% ・ ⭐{r.impact}</span>
           <span className="text-xs font-semibold" style={{ color: C.blue }}>儀表板 ›</span>
         </button>
+
+        {/* 📦 v18：任務清單 filter */}
+        <div className="flex flex-wrap gap-1.5 mt-4 px-1">
+          {[["all", "全部"], ["open", "🔴 未關"], ["done", "✅ 完成"], ["skip", "⏭️ Skip"], ["delegate", "📤 委派"]].map(([f, lab]) => (
+            <Chip key={f} bg={taskFilter === f ? C.body : C.card} fg={taskFilter === f ? "#fff" : C.sub} onClick={() => setTaskFilter(f)}>{lab}</Chip>
+          ))}
+        </div>
 
         {/* 🎪 v16：今日主場 picker — 揀 1–2 條業務線做今日主力，section 會排上最前 */}
         {(() => {
@@ -1675,6 +1720,104 @@ export default function HermesDashboard() {
     );
   }
 
+  // ═══ 📦 v18：封存 tab — 完成任務封存箱 ＋ 🗓️ WIG 計劃表（連 AI）═══
+  function BoxView() {
+    const emOf = id => (cfg.lines.find(l => l.id === id) || { emoji: "🧍" }).emoji;
+    const stEm = st => (st === "done" ? "✅" : st === "skip" ? "⏭️" : "📤");
+    const q = boxSearch.trim().toLowerCase();
+    const days = [...(state.archive || [])].reverse()
+      .map(d => ({ ...d, tasks: q ? d.tasks.filter(t => t.title.toLowerCase().includes(q)) : d.tasks }))
+      .filter(d => d.tasks.length);
+    const total = (state.archive || []).reduce((a, d) => a + d.tasks.length, 0);
+    const plan = state.wigPlan || [];
+    const wigFull = state.wigs.length >= 6;
+    const TERMS = ["短", "中", "長"];
+    const cyclePlan = (id, key) => mutate(s => ({
+      ...s, wigPlan: (s.wigPlan || []).map(p => p.id !== id ? p : key === "term"
+        ? { ...p, term: TERMS[(TERMS.indexOf(p.term) + 1) % 3] }
+        : { ...p, pri: (p.pri + 1) % 3 }),
+    }));
+    const addPlan = (label, term = "中", pri = 1) => {
+      const t = (label || "").trim();
+      if (!t) return;
+      mutate(s => ({ ...s, wigPlan: [...(s.wigPlan || []), { id: uid(), label: t, term: TERMS.includes(term) ? term : "中", pri: [0, 1, 2].includes(pri) ? pri : 1 }] }));
+    };
+    const promote = p => {
+      if (wigFull) return;
+      mutate(s => s.wigs.length >= 6 ? s : { ...s, wigs: [...s.wigs, { id: p.id, label: p.label, term: p.term, pri: p.pri, done: false }], wigPlan: (s.wigPlan || []).filter(x => x.id !== p.id) });
+    };
+    return (
+      <>
+        {/* 🗓️ WIG 計劃表 */}
+        <div className="flex items-center justify-between mt-4 px-1">
+          <SectionHeader color={C.pink}>🗓️ WIG 計劃表 · {plan.length}</SectionHeader>
+          <button onClick={fetchPlanSugs} className="text-xs font-semibold" style={{ color: C.green, background: "none", border: "none" }}>{planSugLoading ? "諗緊…" : "🌱 AI 建議"}</button>
+        </div>
+        <Card style={{ marginTop: 8, overflow: "hidden" }}>
+          {plan.length === 0 && <p className="text-xs px-3 py-3" style={{ color: C.sub }}>WIG board 得 6 個位 — 未輪到嘅目標擺呢度排隊，位一空就 ⬆️ 推上去。</p>}
+          {plan.map((p, i) => (
+            <div key={p.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+              <span className="flex-1 text-sm min-w-0" style={{ color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</span>
+              <span onClick={() => cyclePlan(p.id, "pri")} className="text-xs font-bold rounded-full" style={{ background: priColor(p.pri), color: "#fff", fontSize: 10, padding: "2px 7px", cursor: "pointer", flexShrink: 0 }}>P{p.pri}</span>
+              <span onClick={() => cyclePlan(p.id, "term")} className="text-xs rounded-full" style={{ background: C.bg, color: C.sub, fontSize: 10, padding: "2px 7px", cursor: "pointer", flexShrink: 0 }}>{p.term}期</span>
+              <span onClick={() => promote(p)} style={{ padding: 4, color: wigFull ? C.sub : C.green, opacity: wigFull ? 0.35 : 0.9, flexShrink: 0 }} title={wigFull ? "WIG board 滿咗" : "推上 WIG board"}><ArrowUpCircle size={17} /></span>
+              <span onClick={() => mutate(s => ({ ...s, wigPlan: (s.wigPlan || []).filter(x => x.id !== p.id) }))} style={{ padding: 4, color: C.red, opacity: 0.7, flexShrink: 0 }}><Trash2 size={14} /></span>
+            </div>
+          ))}
+          <div className="flex items-center gap-2 px-3 py-2" style={{ borderTop: plan.length ? `1px solid ${C.line}` : "none" }}>
+            <span className="text-xs" style={{ color: C.sub }}>✍️</span>
+            <input value={planDraft} onChange={e => setPlanDraft(e.target.value)} placeholder="加個計劃 WIG（從 X 到 Y）…"
+              onKeyDown={e => { if (e.key === "Enter") { addPlan(planDraft); setPlanDraft(""); } }}
+              className="flex-1 min-w-0 text-sm py-1" style={{ border: "none", background: "transparent", outline: "none", color: C.body, fontSize: 16 }} />
+            <Chip bg={C.blue} fg="#fff" onClick={() => { addPlan(planDraft); setPlanDraft(""); }}>＋</Chip>
+          </div>
+        </Card>
+        <p className="text-xs mt-1.5 px-1" style={{ color: C.sub }}>撳 P 轉優先級、撳期切換 短／中／長；⬆️ 推上 WIG board（{state.wigs.length}/6）。</p>
+        {(planSugLoading || planSugErr || planSugs.length > 0) && (
+          <div className="flex flex-col gap-1.5 mt-2">
+            {planSugErr && <p className="text-xs px-1" style={{ color: C.red }}>{planSugErr}</p>}
+            {planSugs.map((sg, i) => (
+              <div key={i} className="flex items-center gap-2 px-3 py-2" style={{ background: C.greenSoft, borderRadius: 12 }}>
+                <span className="text-xs flex-1" style={{ color: C.body }}>🌱 {sg.label}<span style={{ color: C.sub }}>（{sg.term || "中"}期・P{sg.pri ?? 1}）</span></span>
+                <Chip bg={C.green} fg="#fff" onClick={() => { addPlan(sg.label, sg.term, sg.pri ?? 1); setPlanSugs(p => p.filter((_, j) => j !== i)); }}>＋ 入表</Chip>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 📦 完成任務封存箱 */}
+        <div className="flex items-center justify-between mt-5 px-1">
+          <SectionHeader>📦 完成任務封存 · {total}</SectionHeader>
+        </div>
+        <Card style={{ marginTop: 8, padding: "8px 12px" }}>
+          <input value={boxSearch} onChange={e => setBoxSearch(e.target.value)} placeholder="🔍 搵返以前做過嘅任務…"
+            className="w-full text-sm py-1" style={{ border: "none", background: "transparent", outline: "none", color: C.body, fontSize: 16 }} />
+        </Card>
+        {days.length === 0 && (
+          <Card style={{ marginTop: 8, padding: 14 }}>
+            <p className="text-xs" style={{ color: C.sub }}>{q ? "搵唔到 — 試下第二個關鍵字。" : "仲未有封存 — 今日做完嘅任務，過咗今日就會自動入嚟呢度。"}</p>
+          </Card>
+        )}
+        {days.map(d => (
+          <div key={d.date}>
+            <div className="mt-4 px-1"><SectionHeader>{fmtMD(d.date)}（週{DOW_LABELS[new Date(d.date + "T00:00:00").getDay()]}）· {d.tasks.length}</SectionHeader></div>
+            <Card style={{ marginTop: 6, overflow: "hidden" }}>
+              {d.tasks.map((t, i) => (
+                <div key={i} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+                  <span style={{ fontSize: 14, flexShrink: 0 }}>{stEm(t.status)}</span>
+                  <span className="flex-1 text-sm min-w-0" style={{ color: C.body }}>{emOf(t.line)} {t.title}</span>
+                  {t.score ? <span className="text-xs" style={{ color: "#FF9500", flexShrink: 0 }}>{"⭐".repeat(t.score)}</span> : null}
+                  {t.status === "skip" && t.reason ? <span className="text-xs" style={{ color: C.sub, flexShrink: 0 }}>（{t.reason}）</span> : null}
+                  {t.status === "delegate" && t.assignee ? <span className="text-xs" style={{ color: C.blue, flexShrink: 0 }}>📤 {t.assignee}</span> : null}
+                </div>
+              ))}
+            </Card>
+          </div>
+        ))}
+      </>
+    );
+  }
+
   const TAB_H = 58;
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: FONT, WebkitFontSmoothing: "antialiased" }}>
@@ -1685,11 +1828,11 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v17.1</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v18</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
-              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : "今日"}</h1>
+              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : tab === "box" ? "封存庫" : "今日"}</h1>
             </div>
             <span className="text-xs font-semibold rounded-full px-2.5 py-1" style={{ background: C.blueSoft, color: C.blue }}>衝刺 #{cfg.sprint.num} · {fmtMD(cfg.sprint.start)}–{fmtMD(cfg.sprint.end)}</span>
           </div>
@@ -1697,7 +1840,7 @@ export default function HermesDashboard() {
       </div>
 
       <div className="mx-auto px-4" style={{ maxWidth: 480, paddingBottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 24px)` }}>
-        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : DashView()}
+        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : tab === "box" ? BoxView() : DashView()}
       </div>
 
       {/* ✨ AI 助手面板 */}
@@ -1821,6 +1964,7 @@ export default function HermesDashboard() {
           {[
             { id: "today", label: "今日", Icon: ListTodo },
             { id: "cal", label: "月曆", Icon: CalendarDays },
+            { id: "box", label: "封存", Icon: Archive },
             { id: "dash", label: "儀表板", Icon: PieChart },
           ].map(t => (
             <button key={t.id} onClick={() => setTab(t.id)}
