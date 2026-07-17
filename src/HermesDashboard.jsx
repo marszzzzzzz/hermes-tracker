@@ -1,6 +1,13 @@
 import { useState, useEffect, useRef, Fragment } from "react";
-import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil } from "lucide-react";
+import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
 
+// v17：📅 月曆 tab ＋ 🔁 週期任務 —
+//      新第三個 tab「月曆」：月份格仔顯示每日嘅 ⏰提醒／📤委派死線／
+//      🔁週期任務／🎯WIG 完成日；撳一日睇明細。今日嘅任務可以喺月曆度
+//      直接改名（✏️）同刪除（🗑️ — 全 app 第一次有得刪任務）。
+//      週期任務：任何一日都可以加「單次／每週（逢週X）／每月（X 號）」，
+//      到期嗰日自動加落 task list（每月 31 號喺短月自動貼月尾；
+//      單次落單後自動剷走）。「所有週期任務」清單一眼睇晒＋管理。
 // v16：🎪 今日主場（多業務老闆日日要答嘅問題：今日主力做邊瓣？）—
 //      今日 tab 揀 1–2 條業務線做主場：section 排上最前＋header 標 🎪，
 //      AI（對話／🌱延伸／WIG 建議）全部圍住主場轉。
@@ -144,6 +151,18 @@ const priColor = p => (p === 0 ? C.red : p === 1 ? C.orange : C.blue);
 const ROADMAP_GOAL = 36;
 // 🎪 v16：業務線連續幾多日冇完成任務就建議做今日主場
 const NEGLECT_DAYS = 3;
+// 🔁 v17：週期任務 — routine 喺某日係咪到期
+//        weekly=逢星期幾（on: 0–6）；monthly=每月幾號（on: 1–31，短月自動貼月尾）；
+//        once=指定日期（on: "YYYY-MM-DD"）
+const DOW_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
+const routineDueOn = (r, dateStr) => {
+  const d = new Date(dateStr + "T00:00:00");
+  if (r.freq === "once") return r.on === dateStr;
+  if (r.freq === "weekly") return d.getDay() === r.on;
+  const dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  return d.getDate() === Math.min(r.on, dim);
+};
+const routineFreqLabel = r => (r.freq === "once" ? `單次 ${fmtMD(r.on)}` : r.freq === "weekly" ? `逢週${DOW_LABELS[r.on]}` : `每月 ${r.on} 號`);
 
 // ✂️ v14：解構收工報告文字用嘅 emoji 前綴
 const stripLeadEmoji = (s, times = 1) => {
@@ -195,7 +214,7 @@ function parseReportSync(text) {
   return items;
 }
 
-const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [], theme: null, lastDone: {} });
+const freshState = cfg => ({ date: todayStr(), diamondInquiry: false, wigs: cfg.wigs.map(w => ({ ...w })), roadmap: [], emailTo: "", apiKey: "", provider: "claude", geminiKey: "", openaiKey: "", tasks: [], history: [], reviewList: [], aiRatings: [], extLog: [], theme: null, lastDone: {}, routines: [] });
 
 function rates(s, cfg) {
   const biz = s.tasks.filter(k => k.line !== "personal" && k.status !== "delegate");
@@ -259,7 +278,15 @@ function Rings({ rows }) {
 export default function HermesDashboard() {
   const [cfg, setCfg] = useState(null);
   const [state, setState] = useState(null);
-  const [tab, setTab] = useState("today"); // "today" | "dash"
+  const [tab, setTab] = useState("today"); // "today" | "dash" | "cal"
+  // 📅 v17：月曆 tab
+  const [calYM, setCalYM] = useState(todayStr().slice(0, 7)); // 顯示緊邊個月 "YYYY-MM"
+  const [calSel, setCalSel] = useState(todayStr()); // 揀咗邊一日
+  const [calDraft, setCalDraft] = useState("");
+  const [calLine, setCalLine] = useState("personal");
+  const [calFreq, setCalFreq] = useState("once"); // "once" | "weekly" | "monthly"
+  const [calEditId, setCalEditId] = useState(null);
+  const [calEditDraft, setCalEditDraft] = useState("");
   const [skipFor, setSkipFor] = useState(null);
   const [delegFor, setDelegFor] = useState(null);
   const [adding, setAdding] = useState(null);
@@ -381,6 +408,32 @@ export default function HermesDashboard() {
     const t = setInterval(check, 60000);
     return () => clearInterval(t);
   }, []);
+
+  // 🔁 v17：週期任務自動落單 — 每分鐘檢查（開 app 嗰下都查一次），
+  //         routine 今日到期而未落過（lastDate !== 今日）就自動加落 task list；
+  //         「單次」routine 落單之後自動剷走
+  useEffect(() => {
+    const spawn = () => setState(prev => {
+      if (!prev || !cfgRef.current) return prev;
+      const today = todayStr();
+      const rs = prev.routines || [];
+      const due = rs.filter(r => routineDueOn(r, today) && r.lastDate !== today);
+      if (!due.length) return prev;
+      const newTasks = due.map(r => {
+        const lineMeta = cfgRef.current.lines.find(l => l.id === r.line);
+        return mk(r.line, r.title, lineMeta?.tier === "focus", { ext: true });
+      });
+      const routines = rs
+        .filter(r => !(r.freq === "once" && due.includes(r)))
+        .map(r => (due.includes(r) ? { ...r, lastDate: today } : r));
+      const n = { ...prev, tasks: [...prev.tasks, ...newTasks], routines };
+      persist(n);
+      return n;
+    });
+    spawn();
+    const t = setInterval(spawn, 60000);
+    return () => clearInterval(t);
+  }, [cfg]);
 
   useEffect(() => {
     (async () => {
@@ -1401,7 +1454,7 @@ export default function HermesDashboard() {
         </Card>
 
         <div className="mt-4 flex items-center justify-end">
-          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate, lastDone: state.lastDone }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
+          <button onClick={() => { const f = { ...freshState(cfg), wigs: state.wigs, roadmap: state.roadmap, emailTo: state.emailTo, apiKey: state.apiKey, provider: state.provider, geminiKey: state.geminiKey, openaiKey: state.openaiKey, aiRatings: state.aiRatings, extLog: state.extLog, digestDate: state.digestDate, lastDone: state.lastDone, routines: state.routines }; setState(f); persist(f); }} className="text-xs font-semibold" style={{ color: C.red, background: "none", border: "none" }}>重設今日</button>
         </div>
         <p className="text-xs mt-2 px-1" style={{ color: C.sub, lineHeight: 1.5 }}>規則：任務唔會自動塞入 — 由 📥 建議揀或自己加（你就係 approval gate）。完成率 = (✅+⏭️上限{cfg.skipCap})÷非委派業務任務；主攻佔比目標 {cfg.budget.focusPct}%。委派 = 揀 PIC + 死線 + 自動「跟收」任務。連紅任務可 ✂️ 拆細；連紅 2 日入週六檢討。</p>
       </>
@@ -1456,6 +1509,164 @@ export default function HermesDashboard() {
     );
   }
 
+  // ═══ 📅 v17：月曆 view — 睇提醒／死線／週期任務／WIG 完成日，可編輯任務＋set 週期任務 ═══
+  function CalView() {
+    const [y, m] = calYM.split("-").map(Number);
+    const dim = new Date(y, m, 0).getDate();
+    const startDow = new Date(y, m - 1, 1).getDay();
+    const ds = d => `${calYM}-${String(d).padStart(2, "0")}`;
+    const today = todayStr();
+    const routines = state.routines || [];
+    const emOf = id => (cfg.lines.find(l => l.id === id) || { emoji: "🧍" }).emoji;
+    const stEm = k => (k.status === "done" ? "✅" : k.status === "skip" ? "⏭️" : k.status === "delegate" ? "📤" : "🔴");
+    const dayMarks = dateStr => {
+      const marks = [];
+      if (routines.some(r => routineDueOn(r, dateStr))) marks.push("🔁");
+      if (state.tasks.some(k => k.remindAt && k.remindAt.slice(0, 10) === dateStr && k.status !== "done")) marks.push("⏰");
+      if (state.tasks.some(k => k.status === "delegate" && !k.received && k.deadline === dateStr)) marks.push("📤");
+      if ((state.roadmap || []).some(w => w.doneDate === dateStr)) marks.push("🎯");
+      return marks.slice(0, 3);
+    };
+    const shiftM = n => { const d = new Date(y, m - 1 + n, 1); setCalYM(d.toLocaleDateString("en-CA").slice(0, 7)); };
+    const selRoutines = routines.filter(r => routineDueOn(r, calSel));
+    const selReminds = state.tasks.filter(k => k.remindAt && k.remindAt.slice(0, 10) === calSel && k.status !== "done");
+    const selDeadlines = state.tasks.filter(k => k.status === "delegate" && !k.received && k.deadline === calSel);
+    const selRoadmap = (state.roadmap || []).filter(w => w.doneDate === calSel);
+    const selIsToday = calSel === today;
+    const selDow = new Date(calSel + "T00:00:00").getDay();
+    const selDom = +calSel.slice(8, 10);
+    const addCal = () => {
+      const t = calDraft.trim();
+      if (!t) return;
+      const lineMeta = cfg.lines.find(l => l.id === calLine) || { tier: "personal" };
+      if (calFreq === "once" && selIsToday) {
+        mutate(s => ({ ...s, tasks: [...s.tasks, mk(calLine, t, lineMeta.tier === "focus")] }));
+      } else {
+        const r = { id: uid(), title: t, line: calLine, freq: calFreq, on: calFreq === "once" ? calSel : calFreq === "weekly" ? selDow : selDom, lastDate: null };
+        mutate(s => ({ ...s, routines: [...(s.routines || []), r] }));
+      }
+      setCalDraft("");
+    };
+    const taskRowCal = (k, i, extra) => (
+      <div key={k.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+        {calEditId === k.id ? (
+          <>
+            <input autoFocus value={calEditDraft} onChange={e => setCalEditDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && calEditDraft.trim()) { setTask(k.id, { title: calEditDraft.trim() }); setCalEditId(null); } if (e.key === "Escape") setCalEditId(null); }}
+              className="flex-1 min-w-0 text-sm py-1" style={{ border: "none", background: C.bg, borderRadius: 8, outline: "none", color: C.body, fontSize: 16, padding: "4px 8px" }} />
+            <Chip bg={C.blue} fg="#fff" onClick={() => { if (calEditDraft.trim()) setTask(k.id, { title: calEditDraft.trim() }); setCalEditId(null); }}>✓</Chip>
+          </>
+        ) : (
+          <>
+            <span style={{ fontSize: 14, flexShrink: 0 }}>{stEm(k)}</span>
+            <span onClick={() => { setCalEditId(k.id); setCalEditDraft(k.title); }} className="flex-1 text-sm min-w-0" style={{ color: k.status === "done" ? C.sub : C.body, textDecoration: k.status === "done" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{emOf(k.line)} {k.title}</span>
+            {extra}
+            <span onClick={() => { setCalEditId(k.id); setCalEditDraft(k.title); }} style={{ padding: 4, color: C.sub, opacity: 0.6 }}><Pencil size={13} /></span>
+            <span onClick={() => mutate(s => ({ ...s, tasks: s.tasks.filter(x => x.id !== k.id) }))} style={{ padding: 4, color: C.red, opacity: 0.7 }}><Trash2 size={14} /></span>
+          </>
+        )}
+      </div>
+    );
+    return (
+      <>
+        {/* 月份導航 + 格仔 */}
+        <Card style={{ marginTop: 12, padding: "12px 10px" }}>
+          <div className="flex items-center justify-between px-1">
+            <button onClick={() => shiftM(-1)} aria-label="上個月" style={{ background: "none", border: "none", color: C.blue, padding: 6 }}><ChevronLeft size={20} /></button>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold" style={{ color: C.body }}>{y} 年 {m} 月</span>
+              {(calYM !== today.slice(0, 7) || calSel !== today) && <Chip bg={C.blueSoft} fg={C.blue} onClick={() => { setCalYM(today.slice(0, 7)); setCalSel(today); }}>返今日</Chip>}
+            </div>
+            <button onClick={() => shiftM(1)} aria-label="下個月" style={{ background: "none", border: "none", color: C.blue, padding: 6 }}><ChevronRight size={20} /></button>
+          </div>
+          <div className="mt-2" style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
+            {DOW_LABELS.map(l => <div key={l} className="text-xs text-center font-semibold py-1" style={{ color: C.sub }}>{l}</div>)}
+            {Array.from({ length: startDow }).map((_, i) => <div key={"b" + i} />)}
+            {Array.from({ length: dim }).map((_, i) => {
+              const dateStr = ds(i + 1);
+              const sel = dateStr === calSel;
+              const isToday = dateStr === today;
+              const marks = dayMarks(dateStr);
+              return (
+                <button key={dateStr} onClick={() => setCalSel(dateStr)}
+                  className="flex flex-col items-center"
+                  style={{ background: sel ? C.blue : "transparent", border: isToday && !sel ? `1.5px solid ${C.blue}` : "none", borderRadius: 10, padding: "4px 0 3px", minHeight: 44, WebkitTapHighlightColor: "transparent", cursor: "pointer" }}>
+                  <span className="text-sm" style={{ color: sel ? "#fff" : isToday ? C.blue : C.body, fontWeight: sel || isToday ? 700 : 400 }}>{i + 1}</span>
+                  <span style={{ fontSize: 8, lineHeight: "10px", letterSpacing: "-1px" }}>{marks.join("")}</span>
+                </button>
+              );
+            })}
+          </div>
+        </Card>
+
+        {/* 選中日 detail */}
+        <div className="mt-4 px-1"><SectionHeader>📅 {fmtMD(calSel)}（週{DOW_LABELS[selDow]}）{selIsToday ? " · 今日" : ""}</SectionHeader></div>
+        <Card style={{ marginTop: 8, overflow: "hidden" }}>
+          {selIsToday && state.tasks.map((k, i) => taskRowCal(k, i))}
+          {selReminds.filter(k => !selIsToday).map((k, i) => taskRowCal(k, (selIsToday ? state.tasks.length : 0) + i, <span className="text-xs" style={{ color: C.blue, flexShrink: 0 }}>⏰ {fmtDT(k.remindAt)}</span>))}
+          {selDeadlines.filter(k => !selIsToday).map((k, i) => taskRowCal(k, 1 + i, <span className="text-xs" style={{ color: C.orange, flexShrink: 0 }}>📤 死線</span>))}
+          {selRoutines.map((r, i) => (
+            <div key={r.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: (i > 0 || (selIsToday && state.tasks.length > 0)) ? `1px solid ${C.line}` : "none" }}>
+              <span style={{ fontSize: 14, flexShrink: 0 }}>🔁</span>
+              <span className="flex-1 text-sm min-w-0" style={{ color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{emOf(r.line)} {r.title}</span>
+              <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.blueSoft, color: C.blue, flexShrink: 0 }}>{routineFreqLabel(r)}</span>
+              <span onClick={() => mutate(s => ({ ...s, routines: (s.routines || []).filter(x => x.id !== r.id) }))} style={{ padding: 4, color: C.red, opacity: 0.7 }}><Trash2 size={14} /></span>
+            </div>
+          ))}
+          {selRoadmap.map((w, i) => (
+            <div key={w.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: `1px solid ${C.line}` }}>
+              <span className="flex items-center justify-center" style={{ width: 18, height: 18, borderRadius: 9, background: C.green, color: "#fff", flexShrink: 0 }}><Check size={11} strokeWidth={3.5} /></span>
+              <span className="flex-1 text-sm" style={{ color: C.sub }}>🎯 完成 WIG：{w.label}</span>
+            </div>
+          ))}
+          {!selIsToday && selReminds.length === 0 && selDeadlines.length === 0 && selRoutines.length === 0 && selRoadmap.length === 0 && (
+            <p className="text-xs px-3 py-3" style={{ color: C.sub }}>呢日暫時乜都未有 — 下面加返個任務或者週期任務。</p>
+          )}
+          {selIsToday && state.tasks.length === 0 && selRoutines.length === 0 && selRoadmap.length === 0 && (
+            <p className="text-xs px-3 py-3" style={{ color: C.sub }}>今日未有任務。</p>
+          )}
+        </Card>
+
+        {/* 加任務／週期任務落呢日 */}
+        <Card style={{ marginTop: 10, padding: 12 }}>
+          <p className="text-xs font-bold" style={{ color: C.body }}>＋ 加落 {fmtMD(calSel)}</p>
+          <input value={calDraft} onChange={e => setCalDraft(e.target.value)} onKeyDown={e => { if (e.key === "Enter") addCal(); }}
+            placeholder="任務名（動詞＋數字＋名詞）…" className="w-full mt-2 px-3 py-2 text-sm"
+            style={{ border: "none", borderRadius: 10, background: C.bg, color: C.body, outline: "none", fontSize: 16 }} />
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {[...cfg.lines, { id: "personal", label: "個人", emoji: "🧍" }].map(l => (
+              <Chip key={l.id} bg={calLine === l.id ? C.blue : C.bg} fg={calLine === l.id ? "#fff" : C.sub} onClick={() => setCalLine(l.id)}>{l.emoji}</Chip>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {[["once", selIsToday ? "淨係今日" : `單次（${fmtMD(calSel)}）`], ["weekly", `每週 · 逢週${DOW_LABELS[selDow]}`], ["monthly", `每月 · ${selDom} 號`]].map(([f, lab]) => (
+              <Chip key={f} bg={calFreq === f ? C.green : C.bg} fg={calFreq === f ? "#fff" : C.sub} onClick={() => setCalFreq(f)}>{f === "once" ? "" : "🔁 "}{lab}</Chip>
+            ))}
+          </div>
+          <div className="flex justify-end mt-2"><Chip bg={C.blue} fg="#fff" onClick={addCal}>＋ 加入</Chip></div>
+          <p className="text-xs mt-2" style={{ color: C.sub }}>🔁 週期任務會喺到期嗰日自動加落 task list；「單次」揀未來日子都會等到嗰日先出現。</p>
+        </Card>
+
+        {/* 所有週期任務 */}
+        {routines.length > 0 && (
+          <>
+            <div className="mt-4 px-1"><SectionHeader>🔁 所有週期任務 · {routines.length}</SectionHeader></div>
+            <Card style={{ marginTop: 8, overflow: "hidden" }}>
+              {routines.map((r, i) => (
+                <div key={r.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+                  <span style={{ fontSize: 14, flexShrink: 0 }}>🔁</span>
+                  <span className="flex-1 text-sm min-w-0" style={{ color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{emOf(r.line)} {r.title}</span>
+                  <span className="text-xs rounded-full px-2 py-0.5" style={{ background: C.blueSoft, color: C.blue, flexShrink: 0 }}>{routineFreqLabel(r)}</span>
+                  <span onClick={() => mutate(s => ({ ...s, routines: (s.routines || []).filter(x => x.id !== r.id) }))} style={{ padding: 4, color: C.red, opacity: 0.7 }}><Trash2 size={14} /></span>
+                </div>
+              ))}
+            </Card>
+          </>
+        )}
+      </>
+    );
+  }
+
   const TAB_H = 58;
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: FONT, WebkitFontSmoothing: "antialiased" }}>
@@ -1466,11 +1677,11 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v16</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v17</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
-              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : "今日"}</h1>
+              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : "今日"}</h1>
             </div>
             <span className="text-xs font-semibold rounded-full px-2.5 py-1" style={{ background: C.blueSoft, color: C.blue }}>衝刺 #{cfg.sprint.num} · {fmtMD(cfg.sprint.start)}–{fmtMD(cfg.sprint.end)}</span>
           </div>
@@ -1478,7 +1689,7 @@ export default function HermesDashboard() {
       </div>
 
       <div className="mx-auto px-4" style={{ maxWidth: 480, paddingBottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 24px)` }}>
-        {tab === "today" ? TodayView() : DashView()}
+        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : DashView()}
       </div>
 
       {/* ✨ AI 助手面板 */}
@@ -1601,6 +1812,7 @@ export default function HermesDashboard() {
         <div className="mx-auto flex" style={{ maxWidth: 480, height: TAB_H }}>
           {[
             { id: "today", label: "今日", Icon: ListTodo },
+            { id: "cal", label: "月曆", Icon: CalendarDays },
             { id: "dash", label: "儀表板", Icon: PieChart },
           ].map(t => (
             <button key={t.id} onClick={() => setTab(t.id)}
