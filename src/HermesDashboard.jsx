@@ -1,6 +1,10 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
 
+// v17.1：修正月曆 tab 打字打一個字就失焦 — Card／Chip／SectionHeader／StatusBtn
+//        本來定義喺 component 入面，每次 render 都係新 identity，React 成個
+//        subtree remount，input 即刻失焦。而家搬晒上 module 層（v11 同款 bug，
+//        今次連根拔起）。
 // v17：📅 月曆 tab ＋ 🔁 週期任務 —
 //      新第三個 tab「月曆」：月份格仔顯示每日嘅 ⏰提醒／📤委派死線／
 //      🔁週期任務／🎯WIG 完成日；撳一日睇明細。今日嘅任務可以喺月曆度
@@ -274,6 +278,23 @@ function Rings({ rows }) {
     </svg>
   );
 }
+
+// v17.1：呢四個細 component 一定要放喺 module 層 —
+// 之前定義咗喺 HermesDashboard 入面，每次 render 都新造一個 function identity，
+// React 當佢係「另一個 component」→ 成個 <Card>/<Chip> subtree unmount 再 mount，
+// 入面嘅 input 打一個字就失焦（v11 隻 bug 換咗個殼再現：月曆 tab 打字打唔到）。
+const StatusBtn = ({ onClick, bg, fg, children, label }) => (
+  <button onClick={onClick} aria-label={label} className="flex items-center justify-center" style={{ width: 40, height: 40, borderRadius: 13, background: bg, color: fg, border: "none", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>{children}</button>
+);
+const Chip = ({ bg, fg, children, onClick }) => (
+  <button onClick={onClick} className="text-xs font-semibold" style={{ background: bg, color: fg, border: "none", borderRadius: 999, padding: "7px 12px", WebkitTapHighlightColor: "transparent" }}>{children}</button>
+);
+const Card = ({ children, style: st }) => (
+  <div style={{ background: C.card, borderRadius: 16, boxShadow: SHADOW, ...st }}>{children}</div>
+);
+const SectionHeader = ({ children, color }) => (
+  <p className="text-xs font-semibold uppercase px-1" style={{ color: color || C.sub, letterSpacing: "0.06em" }}>{children}</p>
+);
 
 export default function HermesDashboard() {
   const [cfg, setCfg] = useState(null);
@@ -955,19 +976,6 @@ export default function HermesDashboard() {
     { label: "主攻佔比", pct: cfg.budget.focusPct ? (r.focusShare / cfg.budget.focusPct) * 100 : 0, note: `${r.focusShare}%／目標 ${cfg.budget.focusPct}`, color: C.blue },
     { label: "個人完成", pct: r.perPct, note: `${r.perPct}%`, color: C.green },
   ];
-
-  const StatusBtn = ({ onClick, bg, fg, children, label }) => (
-    <button onClick={onClick} aria-label={label} className="flex items-center justify-center" style={{ width: 40, height: 40, borderRadius: 13, background: bg, color: fg, border: "none", flexShrink: 0, WebkitTapHighlightColor: "transparent" }}>{children}</button>
-  );
-  const Chip = ({ bg, fg, children, onClick }) => (
-    <button onClick={onClick} className="text-xs font-semibold" style={{ background: bg, color: fg, border: "none", borderRadius: 999, padding: "7px 12px", WebkitTapHighlightColor: "transparent" }}>{children}</button>
-  );
-  const Card = ({ children, style: st }) => (
-    <div style={{ background: C.card, borderRadius: 16, boxShadow: SHADOW, ...st }}>{children}</div>
-  );
-  const SectionHeader = ({ children, color }) => (
-    <p className="text-xs font-semibold uppercase px-1" style={{ color: color || C.sub, letterSpacing: "0.06em" }}>{children}</p>
-  );
 
   function TaskRow({ k }) {
     const closed = k.status !== "open";
@@ -1677,7 +1685,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v17</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v17.1</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
