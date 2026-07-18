@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef, Fragment } from "react";
-import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight, Archive, ArrowUpCircle } from "lucide-react";
+import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight, Archive, ArrowUpCircle, ChartNoAxesGantt } from "lucide-react";
 
+// v19：📊 甘特圖 tab — 日／週／月／兩個月 四段時間軸：
+//      日 view 用鐘頭軸（07–23，有 ⏰ 提醒嘅任務標喺嗰個鐘）；
+//      週／月／兩月用日軸 — 任務 bar 由 created／連紅起點畫到 due／死線／今日
+//      （🔵進行中 🔴連紅 🟠委派 🟢完成），🔁 週期任務逐個到期日標格，
+//      ✅ 封存完成一行彙總（每日數量），🎯 WIG 由今日推去 term 期限
+//      （短=衝刺尾／中=+45日／長=+90日）。task 由 v19 起記 created 日期。
 // v18：📦 封存 tab ＋ 🗓️ WIG 計劃表 ＋ 任務 filter —
 //      新第四個 tab「封存」：過咗嗰日，已關任務（✅／⏭️／📤已收貨）rollover 時
 //      自動封存入嚟（每日一組，留 60 日），有 🔍 搜尋，唔再留喺 task list。
@@ -146,9 +152,11 @@ const SHADOW = "0 1px 3px rgba(0,0,0,0.06)";
 const BLUR = { background: "rgba(242,242,247,0.82)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)" };
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const mk = (line, title, focus = false, extra = {}) => ({ id: uid(), line, title, focus, status: "open", reason: null, red: 0, assignee: null, deadline: null, received: false, due: null, score: null, ext: false, followUp: false, sm: false, remindAt: null, remindEvery: null, remindFired: false, ...extra });
+const mk = (line, title, focus = false, extra = {}) => ({ id: uid(), line, title, focus, status: "open", reason: null, red: 0, assignee: null, deadline: null, received: false, due: null, score: null, ext: false, followUp: false, sm: false, remindAt: null, remindEvery: null, remindFired: false, created: todayStr(), ...extra });
 const todayStr = () => new Date().toLocaleDateString("en-CA");
 const addDays = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toLocaleDateString("en-CA"); };
+// 📊 v19：任意日期 ±n 日（甘特圖計 bar 用）
+const shiftDate = (iso, n) => { const d = new Date(iso + "T00:00:00"); d.setDate(d.getDate() + n); return d.toLocaleDateString("en-CA"); };
 const snapToWindow = (iso, win) => { if (!win) return iso; const d = new Date(iso + "T00:00:00"); while (!win.includes(d.getDay())) d.setDate(d.getDate() + 1); return d.toLocaleDateString("en-CA"); };
 const fmtMD = iso => (iso ? `${+iso.slice(5, 7)}/${+iso.slice(8, 10)}` : "");
 // v13：提醒工具
@@ -327,6 +335,8 @@ export default function HermesDashboard() {
   const [planSugs, setPlanSugs] = useState([]);
   const [planSugLoading, setPlanSugLoading] = useState(false);
   const [planSugErr, setPlanSugErr] = useState("");
+  // 📊 v19：甘特圖 tab 嘅時間範圍
+  const [ganttRange, setGanttRange] = useState("week"); // day | week | month | two
   const [skipFor, setSkipFor] = useState(null);
   const [delegFor, setDelegFor] = useState(null);
   const [adding, setAdding] = useState(null);
@@ -1720,6 +1730,116 @@ export default function HermesDashboard() {
     );
   }
 
+  // ═══ 📊 v19：甘特圖 tab — 日／週／月／兩個月 時間軸 ═══
+  // 日 view：鐘頭軸（07–23），任務有 ⏰ 提醒就標喺嗰個鐘，冇就成日一條淺 bar。
+  // 週／月／兩月 view：日軸 — 任務 bar 由 created（或連紅起點）去到 due／死線／今日；
+  // 🔁 週期任務逐個到期日標格；✅ 封存完成任務一行彙總（每日一格顯示數量）；
+  // 🎯 WIG 由今日推去 term 期限（短=衝刺尾、中=+45日、長=+90日）。
+  function GanttView() {
+    const today = todayStr();
+    const emOf = id => (cfg.lines.find(l => l.id === id) || { emoji: "🧍" }).emoji;
+    const isDay = ganttRange === "day";
+    const HOURS = Array.from({ length: 17 }, (_, i) => i + 7);
+    const startOffset = ganttRange === "week" ? -1 : ganttRange === "month" ? -7 : -14;
+    const nDays = ganttRange === "week" ? 7 : ganttRange === "month" ? 30 : 60;
+    const cols = isDay ? HOURS : Array.from({ length: nDays }, (_, i) => shiftDate(today, startOffset + i));
+    const colW = isDay ? 27 : ganttRange === "week" ? 44 : ganttRange === "month" ? 27 : 22;
+    const N = cols.length;
+    const LBL_W = 118;
+    const idx = d => cols.indexOf(d);
+    const rows = [];
+    if (isDay) {
+      state.tasks.forEach(k => {
+        const done = k.status === "done" || k.status === "skip";
+        let from = 0, to = N - 1, soft = true;
+        if (k.remindAt && k.remindAt.slice(0, 10) === today) {
+          const i = HOURS.indexOf(Math.min(23, Math.max(7, new Date(k.remindAt).getHours())));
+          if (i >= 0) { from = i; to = Math.min(N - 1, i + 1); soft = false; }
+        }
+        const color = done ? C.green : k.red > 0 ? C.red : k.status === "delegate" ? C.orange : C.blue;
+        rows.push({ label: `${emOf(k.line)} ${k.title}`, segs: [{ from, to, color, soft: soft && !done }] });
+      });
+    } else {
+      const first = cols[0], last = cols[N - 1];
+      state.tasks.forEach(k => {
+        const done = k.status === "done" || k.status === "skip";
+        const rawS = done ? today : (k.created || shiftDate(today, -(k.red || 0)));
+        const rawE = done ? today : (k.due || k.deadline || today);
+        const lo = rawS < rawE ? rawS : rawE, hi = rawS < rawE ? rawE : rawS;
+        if (hi < first || lo > last) return;
+        const from = idx(lo < first ? first : lo), to = idx(hi > last ? last : hi);
+        const color = done ? C.green : k.red > 0 ? C.red : k.status === "delegate" ? C.orange : C.blue;
+        rows.push({ label: `${emOf(k.line)} ${k.title}`, segs: [{ from, to, color }] });
+      });
+      const archSegs = (state.archive || []).filter(d => idx(d.date) >= 0).map(d => ({ from: idx(d.date), to: idx(d.date), color: C.green, txt: String(d.tasks.length) }));
+      if (archSegs.length) rows.push({ label: "✅ 已完成（封存）", segs: archSegs });
+      (state.routines || []).forEach(r => {
+        const segs = cols.map((d, i) => (routineDueOn(r, d) ? { from: i, to: i, color: C.blue, soft: true, txt: "🔁" } : null)).filter(Boolean);
+        if (segs.length) rows.push({ label: `🔁 ${emOf(r.line)} ${r.title}`, segs });
+      });
+      state.wigs.forEach(w => {
+        const hor = w.term === "短" ? (cfg.sprint.end > today ? cfg.sprint.end : shiftDate(today, 7)) : w.term === "中" ? shiftDate(today, 45) : shiftDate(today, 90);
+        rows.push({ label: `🎯 P${w.pri} ${w.label}`, segs: [{ from: idx(today), to: idx(hor > last ? last : hor), color: C.green, soft: true }] });
+      });
+    }
+    const nowHourIdx = isDay ? HOURS.indexOf(new Date().getHours()) : -1;
+    const todayIdx = isDay ? -1 : idx(today);
+    const hilite = isDay ? nowHourIdx : todayIdx;
+    const timeline = (segs, rowKey) => (
+      <div style={{ position: "relative", width: N * colW, height: 26, flexShrink: 0, background: `repeating-linear-gradient(90deg, transparent 0, transparent ${colW - 1}px, ${C.line} ${colW - 1}px, ${C.line} ${colW}px)` }}>
+        {hilite >= 0 && <div style={{ position: "absolute", left: hilite * colW, width: colW, top: 0, bottom: 0, background: C.blueSoft, opacity: 0.5 }} />}
+        {segs.map((sg, j) => (
+          <div key={rowKey + "-" + j} style={{ position: "absolute", left: sg.from * colW + 1, width: (sg.to - sg.from + 1) * colW - 2, top: 5, height: 16, borderRadius: 8, background: sg.soft ? sg.color + "2E" : sg.color, border: sg.soft ? `1px solid ${sg.color}` : "none", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: sg.soft ? sg.color : "#fff", overflow: "hidden" }}>{sg.txt || ""}</div>
+        ))}
+      </div>
+    );
+    return (
+      <>
+        <div className="flex flex-wrap gap-1.5 mt-4 px-1">
+          {[["day", "日"], ["week", "週"], ["month", "月"], ["two", "兩個月"]].map(([g, lab]) => (
+            <Chip key={g} bg={ganttRange === g ? C.body : C.card} fg={ganttRange === g ? "#fff" : C.sub} onClick={() => setGanttRange(g)}>{lab}</Chip>
+          ))}
+        </div>
+        <Card style={{ marginTop: 10, overflow: "hidden" }}>
+          {rows.length === 0 ? (
+            <p className="text-xs px-3 py-4" style={{ color: C.sub }}>呢個範圍暫時冇嘢畫 — 加任務／提醒／週期任務先。</p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <div style={{ width: LBL_W + N * colW }}>
+                {/* 時間軸 header */}
+                <div className="flex" style={{ borderBottom: `1px solid ${C.line}` }}>
+                  <div style={{ position: "sticky", left: 0, width: LBL_W, minWidth: LBL_W, background: C.card, zIndex: 2 }} />
+                  <div style={{ position: "relative", width: N * colW, height: 30, flexShrink: 0 }}>
+                    {cols.map((c, i) => {
+                      const d = isDay ? null : new Date(c + "T00:00:00");
+                      const isH = i === hilite;
+                      return (
+                        <div key={i} style={{ position: "absolute", left: i * colW, width: colW, top: 0, bottom: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: isH ? C.blueSoft : "transparent" }}>
+                          <span style={{ fontSize: 9, fontWeight: isH ? 800 : 600, color: isH ? C.blue : C.sub, lineHeight: 1.2 }}>{isDay ? c : d.getDate()}</span>
+                          <span style={{ fontSize: 8, color: isH ? C.blue : C.sub, lineHeight: 1.1 }}>{isDay ? "時" : (d.getDate() === 1 || i === 0 ? `${d.getMonth() + 1}月` : DOW_LABELS[d.getDay()])}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {rows.map((row, ri) => (
+                  <div key={ri} className="flex items-center" style={{ borderTop: ri > 0 ? `1px solid ${C.line}` : "none" }}>
+                    <div className="text-xs px-2" style={{ position: "sticky", left: 0, width: LBL_W, minWidth: LBL_W, background: C.card, zIndex: 2, color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", alignSelf: "stretch", display: "flex", alignItems: "center", borderRight: `1px solid ${C.line}` }}>{row.label}</div>
+                    {timeline(row.segs, ri)}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+        <p className="text-xs mt-1.5 px-1" style={{ color: C.sub, lineHeight: 1.6 }}>
+          🔵 進行中　🔴 連紅　🟠 委派　🟢 完成／WIG（淺色框=時段估算）　🔁 週期任務到期日　✅ 行=封存完成數。
+          {isDay ? "　日 view：有 ⏰ 提醒嘅任務標喺嗰個鐘。" : "　bar 由任務開始日去到 due／死線（冇就今日）。"}
+        </p>
+      </>
+    );
+  }
+
   // ═══ 📦 v18：封存 tab — 完成任務封存箱 ＋ 🗓️ WIG 計劃表（連 AI）═══
   function BoxView() {
     const emOf = id => (cfg.lines.find(l => l.id === id) || { emoji: "🧍" }).emoji;
@@ -1828,11 +1948,11 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v18</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v19</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
-              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : tab === "box" ? "封存庫" : "今日"}</h1>
+              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : tab === "gantt" ? "甘特圖" : tab === "box" ? "封存庫" : "今日"}</h1>
             </div>
             <span className="text-xs font-semibold rounded-full px-2.5 py-1" style={{ background: C.blueSoft, color: C.blue }}>衝刺 #{cfg.sprint.num} · {fmtMD(cfg.sprint.start)}–{fmtMD(cfg.sprint.end)}</span>
           </div>
@@ -1840,7 +1960,7 @@ export default function HermesDashboard() {
       </div>
 
       <div className="mx-auto px-4" style={{ maxWidth: 480, paddingBottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 24px)` }}>
-        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : tab === "box" ? BoxView() : DashView()}
+        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : tab === "gantt" ? GanttView() : tab === "box" ? BoxView() : DashView()}
       </div>
 
       {/* ✨ AI 助手面板 */}
@@ -1964,6 +2084,7 @@ export default function HermesDashboard() {
           {[
             { id: "today", label: "今日", Icon: ListTodo },
             { id: "cal", label: "月曆", Icon: CalendarDays },
+            { id: "gantt", label: "甘特", Icon: ChartNoAxesGantt },
             { id: "box", label: "封存", Icon: Archive },
             { id: "dash", label: "儀表板", Icon: PieChart },
           ].map(t => (
