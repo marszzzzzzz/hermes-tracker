@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight, Archive, ArrowUpCircle, ChartNoAxesGantt } from "lucide-react";
 
+// v19.1：甘特圖易讀性 — ➖／➕ 縮放（60%–200%，格闊／行高／bar 高跟住縮放），
+//        任務名欄加闊＋兩行顯示（唔再一行截斷），chart 用負 margin 谷闊到盡屏幕。
 // v19：📊 甘特圖 tab — 日／週／月／兩個月 四段時間軸：
 //      日 view 用鐘頭軸（07–23，有 ⏰ 提醒嘅任務標喺嗰個鐘）；
 //      週／月／兩月用日軸 — 任務 bar 由 created／連紅起點畫到 due／死線／今日
@@ -337,6 +339,7 @@ export default function HermesDashboard() {
   const [planSugErr, setPlanSugErr] = useState("");
   // 📊 v19：甘特圖 tab 嘅時間範圍
   const [ganttRange, setGanttRange] = useState("week"); // day | week | month | two
+  const [ganttZoom, setGanttZoom] = useState(1); // v19.1：0.6–2.0 倍
   const [skipFor, setSkipFor] = useState(null);
   const [delegFor, setDelegFor] = useState(null);
   const [adding, setAdding] = useState(null);
@@ -1743,9 +1746,13 @@ export default function HermesDashboard() {
     const startOffset = ganttRange === "week" ? -1 : ganttRange === "month" ? -7 : -14;
     const nDays = ganttRange === "week" ? 7 : ganttRange === "month" ? 30 : 60;
     const cols = isDay ? HOURS : Array.from({ length: nDays }, (_, i) => shiftDate(today, startOffset + i));
-    const colW = isDay ? 27 : ganttRange === "week" ? 44 : ganttRange === "month" ? 27 : 22;
+    // v19.1：底闊 × zoom（0.6–2 倍）— 撳 ➖／➕ 縮放
+    const baseW = isDay ? 30 : ganttRange === "week" ? 48 : ganttRange === "month" ? 30 : 24;
+    const colW = Math.round(baseW * ganttZoom);
     const N = cols.length;
-    const LBL_W = 118;
+    const LBL_W = Math.round(148 * Math.min(ganttZoom, 1.2)); // 名欄跟住放大少少
+    const ROW_H = Math.round(38 * Math.min(ganttZoom, 1.3));
+    const BAR_H = Math.round(20 * Math.min(ganttZoom, 1.3));
     const idx = d => cols.indexOf(d);
     const rows = [];
     if (isDay) {
@@ -1786,21 +1793,28 @@ export default function HermesDashboard() {
     const todayIdx = isDay ? -1 : idx(today);
     const hilite = isDay ? nowHourIdx : todayIdx;
     const timeline = (segs, rowKey) => (
-      <div style={{ position: "relative", width: N * colW, height: 26, flexShrink: 0, background: `repeating-linear-gradient(90deg, transparent 0, transparent ${colW - 1}px, ${C.line} ${colW - 1}px, ${C.line} ${colW}px)` }}>
+      <div style={{ position: "relative", width: N * colW, height: ROW_H, flexShrink: 0, background: `repeating-linear-gradient(90deg, transparent 0, transparent ${colW - 1}px, ${C.line} ${colW - 1}px, ${C.line} ${colW}px)` }}>
         {hilite >= 0 && <div style={{ position: "absolute", left: hilite * colW, width: colW, top: 0, bottom: 0, background: C.blueSoft, opacity: 0.5 }} />}
         {segs.map((sg, j) => (
-          <div key={rowKey + "-" + j} style={{ position: "absolute", left: sg.from * colW + 1, width: (sg.to - sg.from + 1) * colW - 2, top: 5, height: 16, borderRadius: 8, background: sg.soft ? sg.color + "2E" : sg.color, border: sg.soft ? `1px solid ${sg.color}` : "none", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: sg.soft ? sg.color : "#fff", overflow: "hidden" }}>{sg.txt || ""}</div>
+          <div key={rowKey + "-" + j} style={{ position: "absolute", left: sg.from * colW + 1, width: (sg.to - sg.from + 1) * colW - 2, top: Math.round((ROW_H - BAR_H) / 2), height: BAR_H, borderRadius: BAR_H / 2, background: sg.soft ? sg.color + "2E" : sg.color, border: sg.soft ? `1px solid ${sg.color}` : "none", display: "flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(10 * Math.min(ganttZoom, 1.3)), fontWeight: 700, color: sg.soft ? sg.color : "#fff", overflow: "hidden" }}>{sg.txt || ""}</div>
         ))}
       </div>
     );
     return (
       <>
-        <div className="flex flex-wrap gap-1.5 mt-4 px-1">
+        <div className="flex flex-wrap items-center gap-1.5 mt-4 px-1">
           {[["day", "日"], ["week", "週"], ["month", "月"], ["two", "兩個月"]].map(([g, lab]) => (
             <Chip key={g} bg={ganttRange === g ? C.body : C.card} fg={ganttRange === g ? "#fff" : C.sub} onClick={() => setGanttRange(g)}>{lab}</Chip>
           ))}
+          {/* v19.1：🔍 縮放 */}
+          <span className="flex items-center gap-1" style={{ marginLeft: "auto" }}>
+            <Chip bg={C.card} fg={ganttZoom <= 0.6 ? C.line : C.body} onClick={() => setGanttZoom(z => Math.max(0.6, Math.round((z - 0.2) * 10) / 10))}>➖</Chip>
+            <span className="text-xs font-semibold" style={{ color: C.sub, minWidth: 34, textAlign: "center" }}>{Math.round(ganttZoom * 100)}%</span>
+            <Chip bg={C.card} fg={ganttZoom >= 2 ? C.line : C.body} onClick={() => setGanttZoom(z => Math.min(2, Math.round((z + 0.2) * 10) / 10))}>➕</Chip>
+          </span>
         </div>
-        <Card style={{ marginTop: 10, overflow: "hidden" }}>
+        {/* v19.1：負 margin 谷闊個 chart，用盡屏幕 */}
+        <Card style={{ marginTop: 10, overflow: "hidden", marginLeft: -12, marginRight: -12 }}>
           {rows.length === 0 ? (
             <p className="text-xs px-3 py-4" style={{ color: C.sub }}>呢個範圍暫時冇嘢畫 — 加任務／提醒／週期任務先。</p>
           ) : (
@@ -1824,7 +1838,10 @@ export default function HermesDashboard() {
                 </div>
                 {rows.map((row, ri) => (
                   <div key={ri} className="flex items-center" style={{ borderTop: ri > 0 ? `1px solid ${C.line}` : "none" }}>
-                    <div className="text-xs px-2" style={{ position: "sticky", left: 0, width: LBL_W, minWidth: LBL_W, background: C.card, zIndex: 2, color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", alignSelf: "stretch", display: "flex", alignItems: "center", borderRight: `1px solid ${C.line}` }}>{row.label}</div>
+                    {/* v19.1：名欄兩行顯示，唔再一行截斷 */}
+                    <div className="px-2" style={{ position: "sticky", left: 0, width: LBL_W, minWidth: LBL_W, background: C.card, zIndex: 2, alignSelf: "stretch", display: "flex", alignItems: "center", borderRight: `1px solid ${C.line}` }}>
+                      <span style={{ fontSize: 11, lineHeight: 1.3, color: C.body, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", wordBreak: "break-all" }}>{row.label}</span>
+                    </div>
                     {timeline(row.segs, ri)}
                   </div>
                 ))}
@@ -1948,7 +1965,7 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v19</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v19.1</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
