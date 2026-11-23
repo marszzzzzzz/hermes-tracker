@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef, Fragment } from "react";
-import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight, Archive, ArrowUpCircle, ChartNoAxesGantt } from "lucide-react";
+import { Flame, Check, SkipForward, UserRoundPlus, Plus, RotateCcw, FileText, Mail, Sparkles, Send, X, ListTodo, PieChart, Pencil, CalendarDays, Trash2, ChevronLeft, ChevronRight, Archive, ArrowUpCircle, ChartNoAxesGantt, TrendingUp } from "lucide-react";
+import { computeWeeklyReview, formatWeeklySummary, deltaText } from "./weeklyReview.js";
 
+// v20：📈 週檢討 tab — 每條線（🏪🥩💎📚🧠🤖＋個人）本週完成／跳過／逾期／完成率，
+//      同上週比較（▲▼）；一撳「複製摘要」生成廣東話文字報告。
+//      資料來自封存（每日一組）＋今日任務；封存冇記 created，所以上週只比完成／跳過，
+//      逾期係「而家」snapshot。邏輯喺 weeklyReview.js（純函數，node --test 驗證）。
 // v19.1：甘特圖易讀性 — ➖／➕ 縮放（60%–200%，格闊／行高／bar 高跟住縮放），
 //        任務名欄加闊＋兩行顯示（唔再一行截斷），chart 用負 margin 谷闊到盡屏幕。
 // v19：📊 甘特圖 tab — 日／週／月／兩個月 四段時間軸：
@@ -333,6 +338,7 @@ export default function HermesDashboard() {
   // 📦 v18：任務清單 filter ＋ 封存 tab ＋ WIG 計劃表
   const [taskFilter, setTaskFilter] = useState("all"); // all | open | done | skip | delegate
   const [boxSearch, setBoxSearch] = useState("");
+  const [reviewCopied, setReviewCopied] = useState(null); // v20："ok" | "fail" | null
   const [planDraft, setPlanDraft] = useState("");
   const [planSugs, setPlanSugs] = useState([]);
   const [planSugLoading, setPlanSugLoading] = useState(false);
@@ -1858,6 +1864,69 @@ export default function HermesDashboard() {
   }
 
   // ═══ 📦 v18：封存 tab — 完成任務封存箱 ＋ 🗓️ WIG 計劃表（連 AI）═══
+  // v20：📈 週檢討 — 用 plain function call（唔係 <JSX/>），冇 input，冇 remount 問題
+  function ReviewView() {
+    const review = computeWeeklyReview(state, cfg, todayStr());
+    const { rows, total, range } = review;
+    const md = iso => fmtMD(iso);
+    const pct = r => (r === null ? "—" : `${r}%`);
+    const copy = async () => {
+      try {
+        await navigator.clipboard.writeText(formatWeeklySummary(review));
+        setReviewCopied("ok");
+      } catch (e) {
+        setReviewCopied("fail");
+      }
+      setTimeout(() => setReviewCopied(null), 2500);
+    };
+    const shown = rows.filter(r => r.thisWeek.done || r.thisWeek.skip || r.lastWeek.done || r.overdue);
+    return (
+      <>
+        <div className="flex items-center justify-between mt-4 px-1">
+          <SectionHeader color={C.pink}>📈 {md(range.start)}–{md(range.end)}</SectionHeader>
+          <button onClick={copy} className="text-xs font-semibold" style={{ color: reviewCopied === "fail" ? C.red : C.green, background: "none", border: "none" }}>
+            {reviewCopied === "ok" ? "✓ 已複製" : reviewCopied === "fail" ? "複製失敗" : "📋 複製摘要"}
+          </button>
+        </div>
+        <Card style={{ marginTop: 8, padding: 14 }}>
+          <div className="flex items-end justify-between">
+            <div>
+              <p className="text-xs" style={{ color: C.sub }}>本週完成</p>
+              <p className="font-bold" style={{ color: C.body, fontSize: 34, lineHeight: 1.1 }}>{total.thisWeek.done}
+                <span className="text-xs font-semibold" style={{ color: total.thisWeek.done >= total.lastWeek.done ? C.green : C.red, marginLeft: 6 }}>{deltaText(total.thisWeek.done, total.lastWeek.done)} vs 上週</span>
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs" style={{ color: C.sub }}>完成率</p>
+              <p className="font-bold" style={{ color: C.blue, fontSize: 24 }}>{pct(total.thisWeek.rate)}</p>
+            </div>
+          </div>
+          <p className="text-xs mt-2" style={{ color: C.sub }}>⏭️ 跳過 {total.thisWeek.skip}　・　⏰ 逾期 {total.overdue}（而家 snapshot）</p>
+        </Card>
+        {shown.length === 0 && (
+          <Card style={{ marginTop: 8, padding: 14 }}>
+            <p className="text-xs" style={{ color: C.sub }}>本週仲未有完成記錄 — 任務做完、過咗日入封存之後就會喺度出現。</p>
+          </Card>
+        )}
+        {shown.length > 0 && (
+          <Card style={{ marginTop: 8, overflow: "hidden" }}>
+            {shown.map((r, i) => (
+              <div key={r.id} className="flex items-center gap-2 px-3 py-2.5" style={{ borderTop: i > 0 ? `1px solid ${C.line}` : "none" }}>
+                <span style={{ fontSize: 18 }}>{r.emoji}</span>
+                <span className="flex-1 text-sm min-w-0" style={{ color: C.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.label}</span>
+                <span className="text-xs font-semibold" style={{ color: C.green }}>✅ {r.thisWeek.done} {deltaText(r.thisWeek.done, r.lastWeek.done)}</span>
+                <span className="text-xs" style={{ color: C.sub }}>⏭️ {r.thisWeek.skip}</span>
+                <span className="text-xs" style={{ color: r.overdue ? C.red : C.sub }}>⏰ {r.overdue}</span>
+                <span className="text-xs font-bold" style={{ color: C.blue, minWidth: 34, textAlign: "right" }}>{pct(r.thisWeek.rate)}</span>
+              </div>
+            ))}
+          </Card>
+        )}
+        <p className="text-xs mt-1.5 px-1" style={{ color: C.sub }}>完成率 ＝ 完成 ÷（完成＋跳過＋逾期）。上週只比較完成數（封存冇記逾期）。</p>
+      </>
+    );
+  }
+
   function BoxView() {
     const emOf = id => (cfg.lines.find(l => l.id === id) || { emoji: "🧍" }).emoji;
     const stEm = st => (st === "done" ? "✅" : st === "skip" ? "⏭️" : "📤");
@@ -1965,11 +2034,11 @@ export default function HermesDashboard() {
           <div className="flex items-end justify-between">
             <div>
               <p className="text-xs font-semibold" style={{ color: C.sub, letterSpacing: "0.04em" }}>
-                HERMES AI <span style={{ color: C.pink }}>v19.1</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
+                HERMES AI <span style={{ color: C.pink }}>v20</span> · {new Date().toLocaleDateString("zh-HK", { month: "long", day: "numeric", weekday: "short" })}
                 {storageOk === true && <span style={{ color: C.green }}> · ● 已同步</span>}
                 {storageOk === false && <span style={{ color: C.red }}> · ⚠︎ 儲存離線</span>}
               </p>
-              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : tab === "gantt" ? "甘特圖" : tab === "box" ? "封存庫" : "今日"}</h1>
+              <h1 className="font-bold" style={{ color: C.body, fontSize: 30, letterSpacing: "-0.6px", lineHeight: 1.15 }}>{tab === "dash" ? "儀表板" : tab === "cal" ? "月曆" : tab === "gantt" ? "甘特圖" : tab === "box" ? "封存庫" : tab === "review" ? "週檢討" : "今日"}</h1>
             </div>
             <span className="text-xs font-semibold rounded-full px-2.5 py-1" style={{ background: C.blueSoft, color: C.blue }}>衝刺 #{cfg.sprint.num} · {fmtMD(cfg.sprint.start)}–{fmtMD(cfg.sprint.end)}</span>
           </div>
@@ -1977,7 +2046,7 @@ export default function HermesDashboard() {
       </div>
 
       <div className="mx-auto px-4" style={{ maxWidth: 480, paddingBottom: `calc(${TAB_H}px + env(safe-area-inset-bottom, 0px) + 24px)` }}>
-        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : tab === "gantt" ? GanttView() : tab === "box" ? BoxView() : DashView()}
+        {tab === "today" ? TodayView() : tab === "cal" ? CalView() : tab === "gantt" ? GanttView() : tab === "box" ? BoxView() : tab === "review" ? ReviewView() : DashView()}
       </div>
 
       {/* ✨ AI 助手面板 */}
@@ -2103,6 +2172,7 @@ export default function HermesDashboard() {
             { id: "cal", label: "月曆", Icon: CalendarDays },
             { id: "gantt", label: "甘特", Icon: ChartNoAxesGantt },
             { id: "box", label: "封存", Icon: Archive },
+            { id: "review", label: "週檢", Icon: TrendingUp },
             { id: "dash", label: "儀表板", Icon: PieChart },
           ].map(t => (
             <button key={t.id} onClick={() => setTab(t.id)}
